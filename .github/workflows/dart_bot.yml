@@ -1,36 +1,31 @@
-name: DART Auto Updater
+name: DART Disclosure Auto Updater
 
 on:
   schedule:
-    # 한국시간(KST) 기준 07:30 ~ 20:00, 10분 간격 실행
-    - cron: '30,40,50 22 * * *'      # 07:30, 07:40, 07:50 KST
-    - cron: '*/10 23 * * *'          # 08:00 ~ 08:50 KST
-    - cron: '*/10 0-10 * * *'        # 09:00 ~ 19:50 KST
-    - cron: '0 11 * * *'             # 20:00 KST
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    # 매일 한국시간 오전 9시 (UTC 기준 0시)에 자동 실행됩니다.
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Actions 탭에서 수동으로 버튼을 눌러 실행할 수 있게 해줍니다.
 
 jobs:
-  run-python-script:
+  update-sheet:
     runs-on: ubuntu-latest
-
     steps:
-    - name: 저장소 체크아웃
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: 파이썬 설정
-      uses: actions/setup-python@v5 # 최신 버전 v5 권장
-      with:
-        python-version: '3.10'
-        cache: 'pip' # 패키지 캐싱으로 실행 속도 향상
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
 
-    - name: 패키지 설치
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-    - name: 파이썬 스크립트 실행
-      env:
-        DART_API_KEY: ${{ secrets.DART_API_KEY }}
-        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-      run: python main.py
+      - name: Run DART Bot script
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: |
+          python main.py

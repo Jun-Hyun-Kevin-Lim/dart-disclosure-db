@@ -1,32 +1,33 @@
-name: DART 자금조달공시 감시 → Google Sheets
+name: DART Auto Updater
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # 15분마다 (UTC 기준)
-  workflow_dispatch:
+    # 10분마다 실행 (UTC 기준)
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # 수동으로 실행할 수 있는 버튼 활성화
 
 jobs:
-  run:
+  run-python-script:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+    - name: 저장소 체크아웃
+      uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - name: 파이썬 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: 패키지 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      - name: Run
-        env:
-          DART_API_KEY: ${{ secrets.DART_API_KEY }}
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          LOOKBACK_DAYS: "0" # 당일(한국시간 기준) 공시만 수집
-          MAX_PAGES: "5"
-          PAGE_COUNT: "100"
-          TIMEZONE: "Asia/Seoul"
-        run: python main.py
+    - name: 파이썬 스크립트 실행
+      env:
+        DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      run: |
+        python main.py

@@ -21,13 +21,13 @@ LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "0")) # 0은 오늘, 테스트 �
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Seoul")
 SEEN_FILE = "seen.json"
 
-# 대표님이 지정해주신 핵심 OpenAPI URL
+# OpenAPI URL
 LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 DOC_URL = "https://opendart.fss.or.kr/api/document.xml"
 DETAIL_APIS = {
-    "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json",
-    "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json",
-    "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json"
+    "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json","https://opendart.fss.or.kr/api/piicDecsn.xml",
+    "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json","https://opendart.fss.or.kr/api/cvbdIsDecsn.xml",
+    "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json","https://opendart.fss.or.kr/api/exbdIsDecsn.xml"
 }
 
 # --- [2] 시트별 독립 필드 정의 (대표님 요청 스펙 100% 반영) ---

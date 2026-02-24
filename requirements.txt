@@ -1,0 +1,6 @@
+requests
+gspread
+google-auth
+pandas
+beautifulsoup4
+lxml

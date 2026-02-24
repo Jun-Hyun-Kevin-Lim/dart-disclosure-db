@@ -4,20 +4,20 @@ import io
 import json
 import zipfile
 import requests
-import pandas as pd
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
 import gspread
+from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
 DART_API_KEY = os.getenv("DART_API_KEY", "").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "DART").strip()
 
-# 당일 데이터만 가져오도록 기본값 0으로 변경
+# 당일 데이터만 가져오도록 기본값 0 설정
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "0"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))
 PAGE_COUNT = int(os.getenv("PAGE_COUNT", "100"))
@@ -65,16 +65,18 @@ def get_gsheet_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-def open_worksheet():
-    require_env("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)
-    gc = get_gsheet_client()
-    sh = gc.open_by_key(GOOGLE_SHEET_ID)
-    return sh.worksheet(WORKSHEET_NAME)
+def get_or_create_worksheet(sh, title: str):
+    try:
+        ws = sh.worksheet(title)
+    except WorksheetNotFound:
+        print(f"[{title}] 시트가 없어 새로 생성합니다.")
+        ws = sh.add_worksheet(title=title, rows="1000", cols="20")
+    return ws
 
 def ensure_header(ws):
     header = [
         "접수번호", "회사명", "상장시장", "보고서명", "이사회결의일", "발행방식", "발행상품",
-        "발행수량(주/권면)", "발행(전환)가(원)", "기준주가(원)", "조달금액(억원)", "할인/할증률",
+        "발행수량(주/권면)", "발행(전환/교환)가(원)", "기준주가(원)", "조달금액(억원)", "할인/할증률",
         "증자전 주식수", "증자비율(%)", "청약일", "납입일", "자금용도", "투자자/대상자", "주관사"
     ]
     first_row = ws.row_values(1)
@@ -108,24 +110,20 @@ def dart_list(bgn_de: str, end_de: str):
         page_no += 1
     return results
 
-def get_structured_dart_data(corp_code: str, bgn_de: str, end_de: str, rcept_no: str, report_nm: str):
+def get_structured_dart_data(corp_code: str, bgn_de: str, end_de: str, rcept_no: str, report_type: str):
     """보고서 종류에 맞는 공식 JSON API를 호출하여 정확한 데이터를 가져옵니다."""
-    report_type = ""
-    if "유상" in report_nm: report_type = "유상증자"
-    elif "전환" in report_nm: report_type = "전환사채"
-    elif "교환" in report_nm: report_type = "교환사채"
-    else: return report_type, {}
+    url = API_URLS.get(report_type)
+    if not url: return {}
 
-    url = API_URLS[report_type]
     params = {"crtfc_key": DART_API_KEY, "corp_code": corp_code, "bgn_de": bgn_de, "end_de": end_de}
-    
     r = requests.get(url, params=params, timeout=30)
     data = r.json()
+    
     if data.get("status") == "000":
         for row in data.get("list", []):
             if str(row.get("rcept_no", "")).strip() == str(rcept_no).strip():
-                return report_type, row
-    return report_type, {}
+                return row
+    return {}
 
 def extract_purpose(data: dict) -> str:
     """자금조달 목적을 파싱하여 문자열로 반환합니다."""
@@ -153,7 +151,6 @@ def parse_html_for_investor_and_underwriter(rcept_no: str) -> dict:
         soup = BeautifulSoup(html, "lxml")
         text = soup.get_text(" ").replace("\n", " ")
         
-        # 단순 키워드 근처 텍스트 추출 (보조 수단)
         investor_match = re.search(r"(배정대상자|제3자\s*배정대상자|투자자)\s*[:：]?\s*([가-힣a-zA-Z0-9\s㈜]+)", text)
         if investor_match: out["투자자"] = investor_match.group(2)[:30].strip()
         
@@ -190,11 +187,23 @@ def build_row(list_item: dict, report_type: str, data: dict, doc_data: dict):
         pre_qty = (parse_int_maybe(data.get("bfic_tisstk_ostk")) or 0) + (parse_int_maybe(data.get("bfic_tisstk_estk")) or 0)
         ratio = round((qty / pre_qty) * 100, 2) if pre_qty and qty else ""
         
-    else: # 전환사채 / 교환사채
+    elif report_type == "전환사채":
         method = data.get("fnd_mthd", "")
-        product = report_type
+        product = "전환사채"
         qty = data.get("bnd_fac_totam", "") # 사채 권면총액
-        issue_price = data.get("cnv_prc") if report_type == "전환사채" else data.get("exch_prc")
+        issue_price = data.get("cnv_prc", "")
+        base_price = ""
+        total_amount = parse_int_maybe(data.get("bnd_fac_totam"))
+        discount = ""
+        sub_date = data.get("sbscpn_bgd", "")
+        pay_date = data.get("sbpmcb_pymdt", "")
+        pre_qty, ratio = "", ""
+        
+    elif report_type == "교환사채":
+        method = data.get("fnd_mthd", "")
+        product = "교환사채"
+        qty = data.get("bnd_fac_totam", "") # 사채 권면총액
+        issue_price = data.get("exch_prc", "")
         base_price = ""
         total_amount = parse_int_maybe(data.get("bnd_fac_totam"))
         discount = ""
@@ -213,7 +222,6 @@ def build_row(list_item: dict, report_type: str, data: dict, doc_data: dict):
 def main():
     require_env("DART_API_KEY", DART_API_KEY)
     require_env("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)
-    require_env("GOOGLE_CREDENTIALS_JSON", GOOGLE_CREDENTIALS_JSON)
 
     tz = ZoneInfo(TIMEZONE)
     today = datetime.now(tz).date()
@@ -221,31 +229,57 @@ def main():
     bgn_de = bgn.strftime("%Y%m%d")
     end_de = today.strftime("%Y%m%d")
 
-    ws = open_worksheet()
-    ensure_header(ws)
-    processed = get_processed_rcept_set(ws)
+    gc = get_gsheet_client()
+    sh = gc.open_by_key(GOOGLE_SHEET_ID)
 
+    # 3개의 시트 객체 준비 및 중복 체크 세팅
+    sheet_names = ["유상증자", "전환사채", "교환사채"]
+    worksheets = {}
+    processed_rcepts = {}
+
+    for name in sheet_names:
+        ws = get_or_create_worksheet(sh, name)
+        ensure_header(ws)
+        worksheets[name] = ws
+        processed_rcepts[name] = get_processed_rcept_set(ws)
+
+    # DART 목록 가져오기
     items = dart_list(bgn_de=bgn_de, end_de=end_de)
-    candidates = [it for it in items if TARGET_REPORT_RE.search(it.get("report_nm", ""))]
-    new_items = [it for it in candidates if it.get("rcept_no") not in processed]
+    
+    rows_to_append = {"유상증자": [], "전환사채": [], "교환사채": []}
 
-    rows_to_append = []
-    for it in new_items:
+    for it in items:
+        report_nm = it.get("report_nm", "")
+        
+        # 보고서 종류 판별
+        report_type = ""
+        if "유상" in report_nm: report_type = "유상증자"
+        elif "전환" in report_nm: report_type = "전환사채"
+        elif "교환" in report_nm: report_type = "교환사채"
+        else: continue # 타겟 공시가 아니면 패스
+
         rcept_no = it.get("rcept_no")
+        # 이미 해당 시트에 입력된 공시면 패스
+        if rcept_no in processed_rcepts[report_type]:
+            continue
+            
         corp_code = it.get("corp_code")
         rcept_dt = it.get("rcept_dt")
         
-        report_type, structured_data = get_structured_dart_data(corp_code, rcept_dt, rcept_dt, rcept_no, it.get("report_nm"))
-        doc_data = parse_html_for_investor_and_underwriter(rcept_no) if structured_data else {}
-        
+        # 세부 데이터 추출
+        structured_data = get_structured_dart_data(corp_code, rcept_dt, rcept_dt, rcept_no, report_type)
         if structured_data:
-            rows_to_append.append(build_row(it, report_type, structured_data, doc_data))
+            doc_data = parse_html_for_investor_and_underwriter(rcept_no)
+            row = build_row(it, report_type, structured_data, doc_data)
+            rows_to_append[report_type].append(row)
 
-    if rows_to_append:
-        ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        print(f"✅ Appended rows: {len(rows_to_append)}")
-    else:
-        print("✅ No new rows to append.")
+    # 분류된 데이터를 각각의 시트에 업로드
+    for name in sheet_names:
+        if rows_to_append[name]:
+            worksheets[name].append_rows(rows_to_append[name], value_input_option="USER_ENTERED")
+            print(f"✅ {name} 추가 완료: {len(rows_to_append[name])}건")
+        else:
+            print(f"✅ {name} 새로 추가할 내용 없음.")
 
 if __name__ == "__main__":
     main()

@@ -3,9 +3,12 @@ import json
 import gspread
 import pandas as pd
 import requests
+import zipfile
+import io
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
-# 1. GitHub Secrets 설정값 불러오기
+# 1. GitHub Secrets 설정값
 dart_key = os.environ['DART_API_KEY']
 service_account_str = os.environ['GOOGLE_CREDENTIALS_JSON']
 sheet_id = os.environ['GOOGLE_SHEET_ID']
@@ -15,8 +18,8 @@ creds = json.loads(service_account_str)
 gc = gspread.service_account_from_dict(creds)
 sh = gc.open_by_key(sheet_id)
 
-# DART API 공통 호출 함수 (JSON 전용)
-def fetch_dart_data(endpoint, params):
+# --- [JSON용] DART API 공통 호출 함수 ---
+def fetch_dart_json(endpoint, params):
     url = f"https://opendart.fss.or.kr/api/{endpoint}"
     try:
         res = requests.get(url, params=params)
@@ -25,106 +28,102 @@ def fetch_dart_data(endpoint, params):
             if data.get('status') == '000' and 'list' in data:
                 return pd.DataFrame(data['list'])
     except Exception as e:
-        print(f"API 호출 에러 ({endpoint}): {e}")
+        print(f"JSON API 에러 ({endpoint}): {e}")
     return pd.DataFrame()
+
+# --- [XML용] DART 원문 다운로드 및 텍스트 추출 함수 ---
+def fetch_dart_xml_text(api_key, rcept_no):
+    url = "https://opendart.fss.or.kr/api/document.xml"
+    params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
+    try:
+        res = requests.get(url, params=params, stream=True)
+        if res.status_code == 200:
+            # 1. ZIP 파일 메모리에서 열기
+            with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+                # 2. 압축 안의 xml 파일 찾기
+                xml_filename = [name for name in z.namelist() if name.endswith('.xml')][0]
+                with z.open(xml_filename) as f:
+                    xml_content = f.read().decode('utf-8')
+                    
+                    # 3. BeautifulSoup으로 HTML/XML 태그 모두 제거하고 텍스트만 추출
+                    soup = BeautifulSoup(xml_content, 'html.parser')
+                    raw_text = soup.get_text(separator=' ', strip=True)
+                    
+                    # 구글 시트 셀 용량 한계 방지를 위해 앞부분 500자만 리턴
+                    return raw_text[:500] + " ...[이하 원문 생략]"
+    except Exception as e:
+        print(f"XML 처리 에러 ({rcept_no}): {e}")
+    return "XML 원문 추출 실패"
 
 def get_and_update():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=7)).strftime('%Y%m%d')
 
-    print("최근 7일 주요 공시 목록을 가져오는 중...")
-    
-    # 1. 공시 목록 조회 (공식 API list.json 사용)
-    list_params = {
-        'crtfc_key': dart_key,
-        'bgn_de': start_date,
-        'end_de': end_date,
-        'pblntf_ty': 'B' # B: 주요사항보고서
-    }
-    all_filings = fetch_dart_data('list.json', list_params)
+    print("최근 7일 주요 공시 목록(JSON) 가져오는 중...")
+    list_params = {'crtfc_key': dart_key, 'bgn_de': start_date, 'end_de': end_date, 'pblntf_ty': 'B'}
+    all_filings = fetch_dart_json('list.json', list_params)
 
     if all_filings.empty:
         print("최근 7일간 발행된 주요사항보고서가 없습니다.")
         return
 
-    # 2. 탭별 상세 API 설정 (올려주신 공식 엔드포인트 적용)
     tasks = [
-        {
-            'name': '유상증자',
-            'keyword': '유상증자결정',
-            'endpoint': 'piicDecsn.json',
-            'cols': ['corp_name', 'report_nm', 'nstk_astk_cnt', 'fnd_am_tamt', 'rcept_no']
-        },
-        {
-            'name': '전환사채',
-            'keyword': '전환사채권발행결정',
-            'endpoint': 'cvbdIsDecsn.json', # 스펠링 수정 완료
-            'cols': ['corp_name', 'report_nm', 'bd_ftnd_tamt', 'cv_prc', 'rcept_no']
-        },
-        {
-            'name': '교환사채',
-            'keyword': '교환사채권발행결정',
-            'endpoint': 'exbdIsDecsn.json', # 스펠링 수정 완료
-            'cols': ['corp_name', 'report_nm', 'bd_ftnd_tamt', 'ex_prc', 'rcept_no']
-        }
+        {'name': '유상증자', 'keyword': '유상증자결정', 'endpoint': 'piicDecsn.json', 'cols': ['corp_name', 'report_nm', 'nstk_astk_cnt', 'fnd_am_tamt', 'rcept_no']},
+        {'name': '전환사채', 'keyword': '전환사채권발행결정', 'endpoint': 'cvbdIsDecsn.json', 'cols': ['corp_name', 'report_nm', 'bd_ftnd_tamt', 'cv_prc', 'rcept_no']},
+        {'name': '교환사채', 'keyword': '교환사채권발행결정', 'endpoint': 'exbdIsDecsn.json', 'cols': ['corp_name', 'report_nm', 'bd_ftnd_tamt', 'ex_prc', 'rcept_no']}
     ]
 
     for task in tasks:
-        print(f"\n[{task['name']}] 데이터 작업 시작...")
-        
-        # 목록에서 해당 키워드가 포함된 공시만 필터링
+        print(f"\n[{task['name']}] 작업 시작...")
         df_filtered = all_filings[all_filings['report_nm'].str.contains(task['keyword'], na=False)]
         
         if df_filtered.empty:
-            print(f"ℹ️ {task['name']}: 해당 기간 내 대상 공시가 없습니다.")
             continue
             
         corp_codes = df_filtered['corp_code'].unique()
         detail_dfs = []
         
-        # 필터링된 회사들의 상세 정보(발행가액, 조달금액 등) 가져오기
         for code in corp_codes:
-            detail_params = {
-                'crtfc_key': dart_key,
-                'corp_code': code,
-                'bgn_de': start_date,
-                'end_de': end_date
-            }
-            df_detail = fetch_dart_data(task['endpoint'], detail_params)
+            detail_params = {'crtfc_key': dart_key, 'corp_code': code, 'bgn_de': start_date, 'end_de': end_date}
+            df_detail = fetch_dart_json(task['endpoint'], detail_params)
             if not df_detail.empty:
                 detail_dfs.append(df_detail)
         
         if not detail_dfs:
-            print(f"ℹ️ {task['name']}: 상세 데이터를 불러올 수 없습니다.")
             continue
             
-        # 상세 데이터 합치기
         df_combined = pd.concat(detail_dfs, ignore_index=True)
-        
-        # 목록 데이터(보고서명 등)와 상세 데이터(발행가 등)를 접수번호 기준으로 합치기
         df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'report_nm']], on='rcept_no', how='inner')
         
-        # 3. 구글 시트 업데이트
         worksheet = sh.worksheet(task['name'])
         col_index = len(task['cols'])
         existing_rcept_nos = worksheet.col_values(col_index)
         
-        # 누락된 컬럼 빈칸 처리
         for col in task['cols']:
             if col not in df_merged.columns:
                 df_merged[col] = ''
         
         df_final = df_merged[task['cols']].copy()
-        
-        # 중복 데이터 제외 (새로운 접수번호만 필터링)
         new_data_df = df_final[~df_final['rcept_no'].astype(str).isin(existing_rcept_nos)]
         
         if not new_data_df.empty:
-            data_to_add = new_data_df.values.tolist()
+            data_to_add = []
+            # 신규 공시가 있을 때만 한 줄씩 XML(원문)을 다운로드하여 붙입니다.
+            for index, row in new_data_df.iterrows():
+                row_list = row.tolist()
+                rcept_no = row['rcept_no']
+                
+                print(f" -> {row['corp_name']} XML 원본 다운로드 및 파싱 중 ({rcept_no})...")
+                xml_text = fetch_dart_xml_text(dart_key, rcept_no)
+                
+                # 기존 JSON 데이터 뒤에 XML 텍스트 추가
+                row_list.append(xml_text)
+                data_to_add.append(row_list)
+                
             worksheet.append_rows(data_to_add)
-            print(f"✅ {task['name']}: 신규 데이터 {len(data_to_add)}건 구글 시트 추가 완료!")
+            print(f"✅ {task['name']}: 신규 데이터 {len(data_to_add)}건 구글 시트 추가 완료 (XML 포함)!")
         else:
-            print(f"ℹ️ {task['name']}: 새로 추가할 공시가 없습니다 (모두 이미 저장됨).")
+            print(f"ℹ️ {task['name']}: 새로 추가할 공시가 없습니다.")
 
 if __name__ == "__main__":
     get_and_update()

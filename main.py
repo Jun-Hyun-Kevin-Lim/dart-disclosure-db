@@ -99,7 +99,8 @@ def main():
     
     # 오늘 공시 목록 조회
     list_url = f"{DART_BASE_URL}/list.json"
-    list_params = {'crtfc_key': DART_API_KEY, 'bgn_de': today_str, 'end_de': today_str, 'pblntf_detail_ty': 'I000'}
+    # pblntf_detail_ty 필터를 삭제하여 당일 전체 공시를 가져오도록 변경
+    list_params = {'crtfc_key': DART_API_KEY, 'bgn_de': today_str, 'end_de': today_str}
     list_data = requests.get(list_url, params=list_params).json()
     
     if list_data.get('status') != '000':

@@ -16,9 +16,9 @@ KST = timezone(timedelta(hours=9))
 today_dt = datetime.now(KST)
 today_str = today_dt.strftime('%Y%m%d')
 
-# 일주일 전 날짜 계산
-week_ago_dt = today_dt - timedelta(days=7)
-week_ago_str = week_ago_dt.strftime('%Y%m%d')
+# 사용자가 요청한 2월 20일부터 조회하도록 설정 (필요시 week_ago_dt 대신 사용)
+start_date_str = "20260220" 
+end_date_str = today_str
 
 # DART API 기본 URL
 DART_BASE_URL = "https://opendart.fss.or.kr/api"

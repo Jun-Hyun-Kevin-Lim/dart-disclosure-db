@@ -25,9 +25,9 @@ SEEN_FILE = "seen.json"
 LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 DOC_URL = "https://opendart.fss.or.kr/api/document.xml"
 DETAIL_APIS = {
-    "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json","https://opendart.fss.or.kr/api/piicDecsn.xml",
-    "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json","https://opendart.fss.or.kr/api/cvbdIsDecsn.xml",
-    "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json","https://opendart.fss.or.kr/api/exbdIsDecsn.xml"
+    "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json",
+    "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json",
+    "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json"
 }
 
 # --- [2] 시트별 독립 필드 정의 (대표님 요청 스펙 100% 반영) ---

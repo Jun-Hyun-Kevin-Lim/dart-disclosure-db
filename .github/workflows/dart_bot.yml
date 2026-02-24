@@ -2,9 +2,8 @@ name: DART Disclosure Auto Updater
 
 on:
   schedule:
-    # 매일 한국시간 오전 9시 (UTC 기준 0시)에 자동 실행됩니다.
     - cron: '0 0 * * *'
-  workflow_dispatch: # Actions 탭에서 수동으로 버튼을 눌러 실행할 수 있게 해줍니다.
+  workflow_dispatch:
 
 jobs:
   update-sheet:
@@ -16,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10' # 3.9에서 3.10으로 변경하여 경고 해결
 
       - name: Install dependencies
         run: |

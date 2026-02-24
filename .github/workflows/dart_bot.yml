@@ -1,4 +1,4 @@
-name: DART 유상증자결정 감시 → Google Sheets
+name: DART 자금조달공시 감시 → Google Sheets
 
 on:
   schedule:
@@ -26,7 +26,7 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           WORKSHEET_NAME: ${{ secrets.WORKSHEET_NAME }}
-          LOOKBACK_DAYS: "2"
+          LOOKBACK_DAYS: "0" # 핵심 변경점: 당일 공시만 타겟
           MAX_PAGES: "5"
           PAGE_COUNT: "100"
           TIMEZONE: "Asia/Seoul"

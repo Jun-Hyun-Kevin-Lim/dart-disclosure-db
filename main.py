@@ -11,9 +11,14 @@ DART_API_KEY = os.getenv("DART_API_KEY", "18d878b167bd1e9f2ec1f7534b543e79463a72
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1CiJSHmTdHGXD_665TcbEB6GEKJao0WJrzb3UGlsfMBo").strip()
 
+# 날짜 관련 설정을 가장 위로 올렸습니다. (에러 해결 포인트)
+KST = timezone(timedelta(hours=9))
+today_dt = datetime.now(KST)
+today_str = today_dt.strftime('%Y%m%d')
+
+# 일주일 전 날짜 계산
 week_ago_dt = today_dt - timedelta(days=7)
 week_ago_str = week_ago_dt.strftime('%Y%m%d')
-# 테스트용 특정 날짜: today_str = '20231025' 
 
 # DART API 기본 URL
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
@@ -99,13 +104,11 @@ def main():
     
     # 일주일치 공시 목록 조회
     list_url = f"{DART_BASE_URL}/list.json"
-    # 시작일(bgn_de)을 week_ago_str로 변경 👇
     list_params = {'crtfc_key': DART_API_KEY, 'bgn_de': week_ago_str, 'end_de': today_str}
     list_data = requests.get(list_url, params=list_params).json()
     
     if list_data.get('status') != '000':
-        print("조회된 공시가 없거나 오류가 발생했습니다.")
-        print(f"DART API 상세 응답: {list_data}") # 이 줄을 추가합니다!
+        print(f"🚨 DART API 상세 응답: {list_data}")
         return
 
     for item in list_data['list']:

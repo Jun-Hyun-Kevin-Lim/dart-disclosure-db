@@ -11,7 +11,8 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
 
 KST = timezone(timedelta(hours=9))
-today_str = datetime.now(KST).strftime('%Y%m%d')
+today_dt = datetime.now(KST)
+today_str = today_dt.strftime('%Y%m%d')
 # 테스트용 특정 날짜: today_str = '20231025' 
 
 # DART API 기본 URL
@@ -103,6 +104,7 @@ def main():
     
     if list_data.get('status') != '000':
         print("조회된 공시가 없거나 오류가 발생했습니다.")
+        print(f"DART API 상세 응답: {list_data}") # 이 줄을 추가합니다!
         return
 
     for item in list_data['list']:

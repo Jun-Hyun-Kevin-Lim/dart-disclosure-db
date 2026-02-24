@@ -31,7 +31,7 @@ def get_google_sheets():
     client = gspread.authorize(creds)
     doc = client.open_by_key(GOOGLE_SHEET_ID)
     return {
-        "유상증자": doc.worksheet("유상증자"),
+        "유상증자": doc.worksheet("유상증자결정"),
         "전환사채": doc.worksheet("전환사채"),
         "교환사채": doc.worksheet("교환사채")
     }

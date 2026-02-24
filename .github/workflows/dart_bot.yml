@@ -25,8 +25,7 @@ jobs:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          WORKSHEET_NAME: ${{ secrets.WORKSHEET_NAME }}
-          LOOKBACK_DAYS: "0" # 핵심 변경점: 당일 공시만 타겟
+          LOOKBACK_DAYS: "0" # 당일(한국시간 기준) 공시만 수집
           MAX_PAGES: "5"
           PAGE_COUNT: "100"
           TIMEZONE: "Asia/Seoul"

@@ -1,5 +1,3 @@
-requests==2.31.0
-gspread==5.12.0
-google-auth==2.23.0
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
+OpenDartReader
+gspread
+pandas

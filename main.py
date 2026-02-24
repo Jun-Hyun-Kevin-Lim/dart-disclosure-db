@@ -2,257 +2,184 @@ import os
 import re
 import io
 import json
-import zipfile
 import requests
-from bs4 import BeautifulSoup
+import zipfile
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from bs4 import BeautifulSoup
 
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
+# --- [1] 환경 설정 ---
 DART_API_KEY = os.getenv("DART_API_KEY", "").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "0"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))
-PAGE_COUNT = int(os.getenv("PAGE_COUNT", "100"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Seoul")
 SEEN_FILE = "seen.json"
 
-API_URLS = {
+# --- [2] API 엔드포인트 설정 (요청하신 목록 반영) ---
+LIST_URL = "https://opendart.fss.or.kr/api/list.json"
+DOC_URL = "https://opendart.fss.or.kr/api/document.xml"
+CORP_URL = "https://opendart.fss.or.kr/api/company.json"
+
+# 결정 공시 API
+REALTIME_APIS = {
     "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json",
     "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json",
     "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json"
 }
-LIST_URL = "https://opendart.fss.or.kr/api/list.json"
-DOC_URL = "https://opendart.fss.or.kr/api/document.xml"
 
-# === 1. 시트별 맞춤형 헤더 정의 ===
+# 기업 분석용 보조 API (공시 발생 시 추가 조회용)
+ANALYSIS_APIS = {
+    "최대주주": "https://opendart.fss.or.kr/api/hyslrSttus.json",
+    "배당": "https://opendart.fss.or.kr/api/alotMatter.json",
+    "임원": "https://opendart.fss.or.kr/api/exctvSttus.json",
+    "타법인출자": "https://opendart.fss.or.kr/api/otrCprInvstmntSttus.json"
+}
+
+# --- [3] 시트별 헤더 정의 (제공해주신 필드 100% 반영) ---
 HEADERS = {
     "유상증자": [
-        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "증자방식", 
-        "보통주발행수", "기타주발행수", "1주당액면가(원)", "신주발행가액(원)", "증자전보통주(주)", "증자전기타주(주)",
-        "시설자금(억)", "영업양수(억)", "운영자금(억)", "채무상환(억)", "타법인취득(억)", "기타자금(억)", 
-        "청약일", "납입일", "투자자(대상자)"
+        "접수번호", "법인구분", "고유번호", "회사명", "신주(보통)", "신주(기타)", "액면가", 
+        "증자전(보통)", "증자전(기타)", "시설자금", "영업양수", "운영자금", "채무상환", "타법인취득", "기타자금", 
+        "증자방식", "공매도해당", "공매도시작", "공매도종료", "최대주주지분율", "최근배당수익률"
     ],
     "전환사채": [
-        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "회차", "사채종류", "발행방법", 
-        "권면총액(원)", "표면이자율(%)", "만기이자율(%)", "사채만기일", 
-        "시설자금(억)", "영업양수(억)", "운영자금(억)", "채무상환(억)", "타법인취득(억)", "기타자금(억)", 
-        "전환비율(%)", "전환가액(원)", "최저조정가액(원)", "전환청구시작일", "전환청구종료일", 
-        "청약일", "납입일", "대표주관사/투자자"
+        "접수번호", "법인구분", "고유번호", "회사명", "회차", "사채종류", "권면총액", "잔여발행한도", 
+        "해외권면", "통화", "기준환율", "발행지역", "해외시장명", "시설자금", "영업양수", "운영자금", 
+        "채무상환", "타법인취득", "기타자금", "표면이율", "만기이율", "사채만기일", "발행방법", 
+        "전환비율", "전환가액", "주식종류", "주식수", "주식총수대비비율", "청구시작", "청구종료", 
+        "최저조정가액", "조정근거", "70%미만가능한도", "합병관련", "청약일", "납입일", "대표주관사", 
+        "보증기관", "이사회결의일", "사외참석(참)", "사외참석(불)", "감사참석", "신고서제출대상", 
+        "면제사유", "대차거래내역", "공정위신고"
     ],
     "교환사채": [
-        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "회차", "사채종류", "발행방법", 
-        "권면총액(원)", "표면이자율(%)", "만기이자율(%)", "사채만기일", 
-        "시설자금(억)", "영업양수(억)", "운영자금(억)", "채무상환(억)", "타법인취득(억)", "기타자금(억)", 
-        "교환비율(%)", "교환가액(원)", "교환청구시작일", "교환청구종료일", 
-        "청약일", "납입일", "대표주관사/투자자"
+        "접수번호", "법인구분", "고유번호", "회사명", "회차", "사채종류", "권면총액", "해외권면", 
+        "통화", "기준환율", "발행지역", "해외시장명", "시설자금", "영업양수", "운영자금", "채무상환", 
+        "타법인취득", "기타자금", "표면이율", "만기이율", "사채만기일", "발행방법", "교환비율", 
+        "교환가액", "가액결정방법", "교환대상종류", "교환대상주식수", "주식총수대비비율", "청구시작", 
+        "청구종료", "청약일", "납입일", "대표주관사", "보증기관", "이사회결의일", "사외참석(참)", 
+        "사외참석(불)", "감사참석", "신고서제출대상", "면제사유", "대차거래내역", "공정위신고"
     ]
 }
 
-def require_env(name: str, value: str):
-    if not value: raise RuntimeError(f"Missing env var: {name}")
-
-def clean_str(x) -> str:
-    if x is None: return ""
-    s = str(x).strip()
-    return "" if s.lower() == "nan" else s
-
-def parse_int_maybe(s: str):
-    s = clean_str(s)
-    if not s: return None
-    t = re.sub(r"[^\d\-\.]", "", s)
-    if t in ("", "-", "."): return None
-    try: return int(float(t)) if "." in t else int(t)
-    except: return None
-
-def amount_eok(won: int):
-    """원 -> 억원 변환 (소수점 2자리)"""
-    if not won: return "0"
-    return str(round(won / 100_000_000, 2))
-
-# === 상태 관리 시스템 ===
+# --- [4] 유틸리티 함수 ---
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r") as f: return set(json.load(f))
-        except: return set()
+        with open(SEEN_FILE, "r") as f: return set(json.load(f))
     return set()
 
 def save_seen(seen_set):
     with open(SEEN_FILE, "w") as f: json.dump(list(seen_set), f)
 
-def get_sheet_seen(ws):
-    col = ws.col_values(1)
-    if not col or col[0].strip() == "접수번호":
-        return set(x.strip() for x in col[1:] if x.strip())
-    return set(x.strip() for x in col if x.strip())
-
-# === DART API 통신부 ===
-def dart_list_json(bgn_de: str, end_de: str):
-    require_env("DART_API_KEY", DART_API_KEY)
-    results, page_no = [], 1
-    while page_no <= MAX_PAGES:
-        params = {"crtfc_key": DART_API_KEY, "bgn_de": bgn_de, "end_de": end_de, "sort": "date", "sort_mth": "desc", "page_no": str(page_no), "page_count": str(PAGE_COUNT)}
-        r = requests.get(LIST_URL, params=params, timeout=30)
-        data = r.json()
-        if data.get("status") != "000": break
-        results.extend(data.get("list", []))
-        if page_no >= data.get("total_page", 1): break
-        page_no += 1
-    return results
-
-def get_json_data(corp_code: str, rcept_no: str, report_type: str):
-    url = API_URLS.get(report_type)
-    if not url: return {}
+def get_or_create_ws(sh, name):
     try:
-        r = requests.get(url, params={"crtfc_key": DART_API_KEY, "corp_code": corp_code}, timeout=30)
-        data = r.json()
-        if data.get("status") == "000":
-            for row in data.get("list", []):
-                if str(row.get("rcept_no", "")).strip() == str(rcept_no).strip():
-                    return row
-    except: pass
-    return {}
+        ws = sh.worksheet(name)
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=name, rows="1000", cols="60")
+    if not ws.row_values(1):
+        ws.append_row(HEADERS[name], value_input_option="USER_ENTERED")
+    return ws
 
-def extract_investor_html(rcept_no: str) -> str:
-    try:
-        r = requests.get(DOC_URL, params={"crtfc_key": DART_API_KEY, "rcept_no": rcept_no}, timeout=60)
-        zf = zipfile.ZipFile(io.BytesIO(r.content))
-        html_file = next(n for n in zf.namelist() if n.lower().endswith((".html", ".htm")))
-        text = BeautifulSoup(zf.read(html_file).decode("utf-8", errors="ignore"), "lxml").get_text(" ").replace("\n", " ")
-        m = re.search(r"(배정대상자|제3자\s*배정대상자|투자자)\s*[:：]?\s*([가-힣a-zA-Z0-9\s㈜]+)", text)
-        if m: return m.group(2)[:30].strip()
-    except: pass
-    return ""
+# --- [5] 분석 데이터 추출 (추가하신 API 활용) ---
+def get_analysis_info(corp_code):
+    """최근 사업보고서 기준 최대주주 지분율 등을 가져옵니다."""
+    year = str(datetime.now().year - 1)
+    res = requests.get(ANALYSIS_APIS["최대주주"], params={
+        "crtfc_key": DART_API_KEY, "corp_code": corp_code, "bsns_year": year, "reprt_code": "11011"
+    })
+    data = res.json().get("list", [])
+    share = next((i.get("thstrm_share_rt", "0") for i in data if "계" in i.get("nm", "")), "0")
+    return share
 
-# === 시트별 데이터 조립 ===
-def build_row(list_item: dict, report_type: str, data: dict, investor: str):
-    # 공통 항목
-    rn = clean_str(list_item.get("rcept_no"))
-    cn = clean_str(list_item.get("corp_name"))
-    mr = clean_str(list_item.get("corp_cls"))
-    mr = {"Y": "KOSPI", "K": "KOSDAQ", "N": "KONEX", "E": "ETC"}.get(mr, mr)
-    rpt = clean_str(list_item.get("report_nm"))
-    bd = clean_str(data.get("bddd")) # 이사회결의일
-    
-    # 자금 목적 공통 (억원)
-    fclt = amount_eok(parse_int_maybe(data.get("fdpp_fclt")))
-    bsn = amount_eok(parse_int_maybe(data.get("fdpp_bsninh")))
-    op = amount_eok(parse_int_maybe(data.get("fdpp_op")))
-    dtrp = amount_eok(parse_int_maybe(data.get("fdpp_dtrp")))
-    ocsa = amount_eok(parse_int_maybe(data.get("fdpp_ocsa")))
-    etc = amount_eok(parse_int_maybe(data.get("fdpp_etc")))
-    
-    # 추가 정보 조합 (투자자 or 주관사)
-    rpmcmp = clean_str(data.get("rpmcmp"))
-    inv_or_uw = rpmcmp if rpmcmp else investor
-
-    if report_type == "유상증자":
-        return [
-            rn, cn, mr, rpt, bd,
-            clean_str(data.get("ic_mthn")), # 증자방식
-            clean_str(data.get("nstk_ostk_cnt")), # 보통주
-            clean_str(data.get("nstk_estk_cnt")), # 기타주
-            clean_str(data.get("fv_ps")), # 1주당액면가
-            clean_str(data.get("tisstk_prc")), # 신주발행가액
-            clean_str(data.get("bfic_tisstk_ostk")), # 증자전 보통주
-            clean_str(data.get("bfic_tisstk_estk")), # 증자전 기타주
-            fclt, bsn, op, dtrp, ocsa, etc,
-            clean_str(data.get("sbscpn_bgd")), # 청약일
-            clean_str(data.get("pymdt")), # 납입일
-            investor
-        ]
-        
-    elif report_type == "전환사채":
-        return [
-            rn, cn, mr, rpt, bd,
-            clean_str(data.get("bd_tm")), clean_str(data.get("bd_knd")), clean_str(data.get("bdis_mthn")),
-            clean_str(data.get("bd_fta")), clean_str(data.get("bd_intr_ex")), clean_str(data.get("bd_intr_sf")), clean_str(data.get("bd_mtd")),
-            fclt, bsn, op, dtrp, ocsa, etc,
-            clean_str(data.get("cv_rt")), clean_str(data.get("cv_prc")), clean_str(data.get("act_mktprcfl_cvprc_lwtrsprc")),
-            clean_str(data.get("cvrqpd_bgd")), clean_str(data.get("cvrqpd_edd")),
-            clean_str(data.get("sbd")), clean_str(data.get("pymd")), inv_or_uw
-        ]
-        
-    elif report_type == "교환사채":
-        return [
-            rn, cn, mr, rpt, bd,
-            clean_str(data.get("bd_tm")), clean_str(data.get("bd_knd")), clean_str(data.get("bdis_mthn")),
-            clean_str(data.get("bd_fta")), clean_str(data.get("bd_intr_ex")), clean_str(data.get("bd_intr_sf")), clean_str(data.get("bd_mtd")),
-            fclt, bsn, op, dtrp, ocsa, etc,
-            clean_str(data.get("ex_rt")), clean_str(data.get("ex_prc")),
-            clean_str(data.get("exrqpd_bgd")), clean_str(data.get("exrqpd_edd")),
-            clean_str(data.get("sbd")), clean_str(data.get("pymd")), inv_or_uw
-        ]
-
+# --- [6] 메인 실행 로직 ---
 def main():
-    require_env("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)
-    info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    gc = gspread.authorize(Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]))
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    gc = gspread.authorize(creds)
     sh = gc.open_by_key(GOOGLE_SHEET_ID)
 
     tz = ZoneInfo(TIMEZONE)
     today = datetime.now(tz).date()
-    bgn = today - timedelta(days=LOOKBACK_DAYS)
-    bgn_de, end_de = bgn.strftime("%Y%m%d"), today.strftime("%Y%m%d")
-
-    sheet_names = ["유상증자", "전환사채", "교환사채"]
-    worksheets = {}
+    bgn_de = (today - timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
     
-    local_seen = load_seen()
-    sheet_seen = set()
-
-    # 시트 로드 및 헤더 세팅
-    for name in sheet_names:
-        ws = get_or_create_worksheet(sh, name)
-        if not ws.row_values(1): ws.append_row(HEADERS[name], value_input_option="USER_ENTERED")
-        worksheets[name] = ws
-        sheet_seen.update(get_sheet_seen(ws))
-
-    items = dart_list_json(bgn_de, end_de)
-    print(f"📋 공시 목록 검색 완료: {bgn_de}~{end_de} (총 {len(items)}건)")
+    # 목록 검색
+    list_res = requests.get(LIST_URL, params={"crtfc_key": DART_API_KEY, "bgn_de": bgn_de, "page_count": "100"}).json()
+    items = list_res.get("list", [])
     
-    rows_to_append = {"유상증자": [], "전환사채": [], "교환사채": []}
-    newly_processed = set()
+    seen = load_seen()
+    
+    for name in ["유상증자", "전환사채", "교환사채"]:
+        ws = get_or_create_ws(sh, name)
+        sheet_rcepts = set(ws.col_values(1)[1:])
+        
+        keyword = "유상증자" if name == "유상증자" else name
+        targets = [it for it in items if keyword in it.get("report_nm", "")]
+        
+        rows = []
+        for t in targets:
+            r_no = t.get("rcept_no")
+            # 중복 체크 (시트에서 지우거나 seen.json에서 지우면 재수집)
+            if r_no not in sheet_rcepts and r_no not in seen:
+                print(f"🔍 분석 중: [{t.get('corp_name')}] {t.get('report_nm')}")
+                
+                # 상세 결정 정보 호출
+                detail_res = requests.get(REALTIME_APIS[name], params={"crtfc_key": DART_API_KEY, "corp_code": t.get("corp_code")}).json()
+                detail = next((d for d in detail_res.get("list", []) if d.get("rcept_no") == r_no), None)
+                
+                if detail:
+                    # 추가 분석 정보 (최대주주 지분율 등)
+                    share_rt = get_analysis_info(t.get("corp_code"))
+                    
+                    if name == "유상증자":
+                        row = [
+                            detail.get("rcept_no"), detail.get("corp_cls"), detail.get("corp_code"), detail.get("corp_name"),
+                            detail.get("nstk_ostk_cnt"), detail.get("nstk_estk_cnt"), detail.get("fv_ps"),
+                            detail.get("bfic_tisstk_ostk"), detail.get("bfic_tisstk_estk"), detail.get("fdpp_fclt"),
+                            detail.get("fdpp_bsninh"), detail.get("fdpp_op"), detail.get("fdpp_dtrp"),
+                            detail.get("fdpp_ocsa"), detail.get("fdpp_etc"), detail.get("ic_mthn"),
+                            detail.get("ssl_at"), detail.get("ssl_bgd"), detail.get("ssl_edd"), share_rt
+                        ]
+                    elif name == "전환사채":
+                        row = [
+                            detail.get("rcept_no"), detail.get("corp_cls"), detail.get("corp_code"), detail.get("corp_name"),
+                            detail.get("bd_tm"), detail.get("bd_knd"), detail.get("bd_fta"), detail.get("atcsc_rmislmt"),
+                            detail.get("ovis_fta"), detail.get("ovis_fta_crn"), detail.get("ovis_ster"), detail.get("ovis_isar"),
+                            detail.get("ovis_mktnm"), detail.get("fdpp_fclt"), detail.get("fdpp_bsninh"), detail.get("fdpp_op"),
+                            detail.get("fdpp_dtrp"), detail.get("fdpp_ocsa"), detail.get("fdpp_etc"), detail.get("bd_intr_ex"),
+                            detail.get("bd_intr_sf"), detail.get("bd_mtd"), detail.get("bdis_mthn"), detail.get("cv_rt"),
+                            detail.get("cv_prc"), detail.get("cvisstk_knd"), detail.get("cvisstk_cnt"), detail.get("cvisstk_tisstk_vs"),
+                            detail.get("cvrqpd_bgd"), detail.get("cvrqpd_edd"), detail.get("act_mktprcfl_cvprc_lwtrsprc"),
+                            detail.get("act_mktprcfl_cvprc_lwtrsprc_bs"), detail.get("rmislmt_lt70p"), detail.get("abmg"),
+                            detail.get("sbd"), detail.get("pymd"), detail.get("rpmcmp"), detail.get("grint"), detail.get("bddd"),
+                            detail.get("od_a_at_t"), detail.get("od_a_at_b"), detail.get("adt_a_atn"), detail.get("rs_sm_atn"),
+                            detail.get("ex_sm_r"), detail.get("ovis_ltdtl"), detail.get("ftc_stt_atn")
+                        ]
+                    elif name == "교환사채":
+                        row = [
+                            detail.get("rcept_no"), detail.get("corp_cls"), detail.get("corp_code"), detail.get("corp_name"),
+                            detail.get("bd_tm"), detail.get("bd_knd"), detail.get("bd_fta"), detail.get("ovis_fta"),
+                            detail.get("ovis_fta_crn"), detail.get("ovis_ster"), detail.get("ovis_isar"), detail.get("ovis_mktnm"),
+                            detail.get("fdpp_fclt"), detail.get("fdpp_bsninh"), detail.get("fdpp_op"), detail.get("fdpp_dtrp"),
+                            detail.get("fdpp_ocsa"), detail.get("fdpp_etc"), detail.get("bd_intr_ex"), detail.get("bd_intr_sf"),
+                            detail.get("bd_mtd"), detail.get("bdis_mthn"), detail.get("ex_rt"), detail.get("ex_prc"),
+                            detail.get("ex_prc_dmth"), detail.get("extg"), detail.get("extg_stkcnt"), detail.get("extg_tisstk_vs"),
+                            detail.get("exrqpd_bgd"), detail.get("exrqpd_edd"), detail.get("sbd"), detail.get("pymd"),
+                            detail.get("rpmcmp"), detail.get("grint"), detail.get("bddd"), detail.get("od_a_at_t"),
+                            detail.get("od_a_at_b"), detail.get("adt_a_atn"), detail.get("rs_sm_atn"), detail.get("ex_sm_r"),
+                            detail.get("ovis_ltdtl"), detail.get("ftc_stt_atn")
+                        ]
+                    rows.append(row)
+                    seen.add(r_no)
+        
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+            print(f"✅ {name} {len(rows)}건 추가 완료")
 
-    for it in items:
-        rpt = it.get("report_nm", "")
-        if "유상" in rpt and "결정" in rpt: r_type = "유상증자"
-        elif "전환사채" in rpt and "결정" in rpt: r_type = "전환사채"
-        elif "교환사채" in rpt and "결정" in rpt: r_type = "교환사채"
-        else: continue 
-
-        r_no = it.get("rcept_no")
-        print(f"\n🔍 타겟 발견: [{it.get('corp_name')}] {rpt} ({r_no})")
-
-        # ✨ 여기서 중복을 거릅니다! 다시 가져오려면 seen.json과 시트에서 지우면 됩니다.
-        if r_no in sheet_seen or r_no in local_seen:
-            print("   -> 🚫 이미 처리된 공시입니다. 패스.")
-            continue
-            
-        json_data = get_json_data(it.get("corp_code"), r_no, r_type)
-        if json_data:
-            investor = extract_investor_html(r_no)
-            row = build_row(it, r_type, json_data, investor)
-            rows_to_append[r_type].append(row)
-            newly_processed.add(r_no)
-            print("   -> ✅ 데이터 맞춤형 매핑 완료.")
-        else:
-            print("   -> ⏳ 금감원 데이터 처리 지연. 다음 실행 시 재시도합니다.")
-
-    for name in sheet_names:
-        if rows_to_append[name]:
-            worksheets[name].append_rows(rows_to_append[name], value_input_option="USER_ENTERED")
-            print(f"✅ {name} 시트: {len(rows_to_append[name])}건 업데이트.")
-
-    if newly_processed:
-        local_seen.update(newly_processed)
-        save_seen(local_seen)
+    save_seen(seen)
 
 if __name__ == "__main__":
     main()

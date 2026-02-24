@@ -1,4 +1,5 @@
 import os
+import urllib
 import json
 import requests
 import gspread
@@ -6,13 +7,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timezone, timedelta
 
 # 1. 환경 변수 설정
-DART_API_KEY = os.getenv("DART_API_KEY", "").strip()
+DART_API_KEY = os.getenv("DART_API_KEY", "18d878b167bd1e9f2ec1f7534b543e79463a72ac").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1CiJSHmTdHGXD_665TcbEB6GEKJao0WJrzb3UGlsfMBo").strip()
 
-KST = timezone(timedelta(hours=9))
-today_dt = datetime.now(KST)
-today_str = today_dt.strftime('%Y%m%d')
+week_ago_dt = today_dt - timedelta(days=7)
+week_ago_str = week_ago_dt.strftime('%Y%m%d')
 # 테스트용 특정 날짜: today_str = '20231025' 
 
 # DART API 기본 URL
@@ -97,10 +97,10 @@ def main():
     # 새로 추가할 데이터 리스트
     rows_to_add = {"유상증자": [], "전환사채": [], "교환사채": []}
     
-    # 오늘 공시 목록 조회
+    # 일주일치 공시 목록 조회
     list_url = f"{DART_BASE_URL}/list.json"
-    # pblntf_detail_ty 필터를 삭제하여 당일 전체 공시를 가져오도록 변경
-    list_params = {'crtfc_key': DART_API_KEY, 'bgn_de': today_str, 'end_de': today_str}
+    # 시작일(bgn_de)을 week_ago_str로 변경 👇
+    list_params = {'crtfc_key': DART_API_KEY, 'bgn_de': week_ago_str, 'end_de': today_str}
     list_data = requests.get(list_url, params=list_params).json()
     
     if list_data.get('status') != '000':

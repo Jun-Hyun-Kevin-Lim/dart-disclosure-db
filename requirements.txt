@@ -1,4 +1,4 @@
-OpenDartReader
 gspread
 pandas
 requests
+beautifulsoup4

@@ -2,13 +2,12 @@ name: DART Auto Updater
 
 on:
   schedule:
-    # 1. KST 07:30 ~ 07:50 (UTC 22:30 ~ 22:50)
-    - cron: '30-59/10 22 * * 1-5' 
-    # 2. KST 08:00 ~ 19:50 (UTC 23:00 ~ 10:50)
-    - cron: '*/10 23,0-10 * * 1-5'
-    # 3. KST 20:00 (UTC 11:00)
-    - cron: '0 11 * * 1-5'
-  workflow_dispatch:
+    # 한국시간(KST) 기준 07:30 ~ 20:00, 10분 간격 실행
+    - cron: '30,40,50 22 * * *'      # 07:30, 07:40, 07:50 KST
+    - cron: '*/10 23 * * *'          # 08:00 ~ 08:50 KST
+    - cron: '*/10 0-10 * * *'        # 09:00 ~ 19:50 KST
+    - cron: '0 11 * * *'             # 20:00 KST
+  workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
   run-python-script:
@@ -19,19 +18,19 @@ jobs:
       uses: actions/checkout@v4
 
     - name: 파이썬 설정
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5 # 최신 버전 v5 권장
       with:
         python-version: '3.10'
+        cache: 'pip' # 패키지 캐싱으로 실행 속도 향상
 
     - name: 패키지 설치
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
     - name: 파이썬 스크립트 실행
       env:
         DART_API_KEY: ${{ secrets.DART_API_KEY }}
         GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-      run: |
-        python main.py
+      run: python main.py

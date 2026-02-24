@@ -13,282 +13,185 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
+# --- [1] 환경 및 API 설정 ---
 DART_API_KEY = os.getenv("DART_API_KEY", "").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
 
-# 당일 공시만 가져오기 (테스트 시 1~3으로 늘려보세요)
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "0"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))
 PAGE_COUNT = int(os.getenv("PAGE_COUNT", "100"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Seoul")
+SEEN_FILE = "seen.json"
 
-# 타겟 공시명 정규식
-TARGET_REPORT_RE = re.compile(r"(유상\s*증자\s*결정|전환\s*사채\s*권\s*발행\s*결정|교환\s*사채\s*권\s*발행\s*결정)")
+# API 엔드포인트 (대표님이 지정하신 전용 상세 JSON API 포함)
+LIST_URL = "https://opendart.fss.or.kr/api/list.json"
+DOC_URL = "https://opendart.fss.or.kr/api/document.xml"
+DETAIL_APIS = {
+    "유상증자": "https://opendart.fss.or.kr/api/piicDecsn.json",
+    "전환사채": "https://opendart.fss.or.kr/api/cvbdIsDecsn.json",
+    "교환사채": "https://opendart.fss.or.kr/api/exbdIsDecsn.json"
+}
 
-# 대표님이 정리해주신 필수 URL 적용
-LIST_URL = "https://opendart.fss.or.kr/api/list.json"      # 목록은 다루기 쉬운 json으로
-DOC_URL = "https://opendart.fss.or.kr/api/document.xml"    # 문서는 xml(zip)만 지원
+# --- [2] 시트별 최적화 헤더 정의 ---
+HEADERS = {
+    "유상증자": [
+        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "증자방식", "보통주발행수", "기타주발행수", 
+        "1주당액면가(원)", "신주발행가액(원)", "증자전보통주(주)", "증자전기타주(주)", "시설자금(억)", "영업양수(억)", 
+        "운영자금(억)", "채무상환(억)", "타법인취득(억)", "기타자금(억)", "청약일", "납입일", "투자자(대상자)"
+    ],
+    "전환사채": [
+        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "회차", "사채종류", "발행방법", "권면총액(원)", 
+        "표면이자율(%)", "만기이자율(%)", "사채만기일", "시설자금(억)", "영업양수(억)", "운영자금(억)", "채무상환(억)", 
+        "타법인취득(억)", "기타자금(억)", "전환비율(%)", "전환가액(원)", "최저조정가액(원)", "전환청구시작일", 
+        "전환청구종료일", "청약일", "납입일", "대표주관사/투자자"
+    ],
+    "교환사채": [
+        "접수번호", "회사명", "시장구분", "보고서명", "이사회결의일", "회차", "사채종류", "발행방법", "권면총액(원)", 
+        "표면이자율(%)", "만기이자율(%)", "사채만기일", "시설자금(억)", "영업양수(억)", "운영자금(억)", "채무상환(억)", 
+        "타법인취득(억)", "기타자금(억)", "교환비율(%)", "교환가액(원)", "교환청구시작일", "교환청구종료일", 
+        "청약일", "납입일", "대표주관사/투자자"
+    ]
+}
 
-def require_env(name: str, value: str):
-    if not value:
-        raise RuntimeError(f"Missing required env var: {name}")
+# --- [3] 데이터 정제 및 상태 관리 유틸리티 ---
+def clean_str(val):
+    return str(val).strip() if val is not None else ""
 
-def clean_str(x) -> str:
-    if x is None: return ""
-    s = str(x).strip()
-    return "" if s.lower() == "nan" else s
-
-def normalize_ws(s: str) -> str:
-    s = clean_str(s)
-    return re.sub(r"\s+", " ", s).strip()
-
-def extract_number(s: str):
-    s = clean_str(s)
-    if not s: return ""
-    t = re.sub(r"[^\d\-\.]", "", s)
-    if t in ("", "-", "."): return ""
+def amount_eok(won):
     try:
-        return str(int(float(t)) if "." in t else int(t))
-    except:
-        return ""
+        val = re.sub(r"[^\d\-\.]", "", str(won))
+        return str(round(int(float(val)) / 100_000_000, 2))
+    except: return "0"
 
-def get_gsheet_client():
-    require_env("GOOGLE_CREDENTIALS_JSON", GOOGLE_CREDENTIALS_JSON)
-    info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        try:
+            with open(SEEN_FILE, "r") as f: return set(json.load(f))
+        except: return set()
+    return set()
 
-def get_or_create_worksheet(sh, title: str):
+def save_seen(seen_set):
+    with open(SEEN_FILE, "w") as f: json.dump(list(seen_set), f)
+
+def get_or_create_ws(sh, title):
     try:
         ws = sh.worksheet(title)
     except WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows="1000", cols="20")
+        print(f"[{title}] 시트를 신규 생성합니다.")
+        ws = sh.add_worksheet(title=title, rows="1000", cols="30")
+    if not ws.row_values(1):
+        ws.append_row(HEADERS[title], value_input_option="USER_ENTERED")
     return ws
 
-def ensure_header(ws):
-    header = [
-        "접수번호", "회사명", "상장시장", "보고서명", "이사회결의일", "발행방식", "발행상품",
-        "발행수량(주/권면)", "발행(전환/교환)가(원)", "기준주가(원)", "조달금액(억원)", "할인/할증률",
-        "증자전 주식수", "증자비율(%)", "청약일", "납입일", "자금용도", "투자자/대상자", "주관사"
-    ]
-    if not ws.row_values(1):
-        ws.append_row(header, value_input_option="USER_ENTERED")
-
-def get_processed_rcept_set(ws):
-    col = ws.col_values(1)
-    if not col or col[0].strip() == "접수번호":
-        return set(x.strip() for x in col[1:] if x.strip())
-    return set(x.strip() for x in col if x.strip())
-
-def dart_list_json(bgn_de: str, end_de: str):
-    """list.json을 활용하여 공시 목록을 가져옵니다."""
-    require_env("DART_API_KEY", DART_API_KEY)
-    results = []
-    page_no = 1
-    while page_no <= MAX_PAGES:
-        params = {
-            "crtfc_key": DART_API_KEY, "bgn_de": bgn_de, "end_de": end_de,
-            "sort": "date", "sort_mth": "desc",
-            "page_no": str(page_no), "page_count": str(PAGE_COUNT),
-        }
-        r = requests.get(LIST_URL, params=params, timeout=30)
-        data = r.json()
-        
-        if data.get("status") != "000": break
-        
-        results.extend(data.get("list", []))
-        
-        total_page = data.get("total_page", 1)
-        if page_no >= total_page: break
-        page_no += 1
-    return results
-
-def get_document_html(rcept_no: str) -> str:
-    """document.xml을 호출해 ZIP 파일을 다운받고 메인 HTML을 추출합니다."""
+# --- [4] HTML 보조 분석 (투자자 등 텍스트 정보 추출) ---
+def get_investor_from_html(rcept_no):
     params = {"crtfc_key": DART_API_KEY, "rcept_no": rcept_no}
     try:
         r = requests.get(DOC_URL, params=params, timeout=60)
         zf = zipfile.ZipFile(io.BytesIO(r.content))
-        # HTML 파일 찾기 (보통 여러 개가 있지만 가장 용량이 큰 것이 본문입니다)
-        html_files = [n for n in zf.namelist() if n.lower().endswith((".html", ".htm"))]
-        if not html_files: return ""
-        largest_html = max(html_files, key=lambda n: zf.getinfo(n).file_size)
-        raw = zf.read(largest_html)
-        
-        # 인코딩 처리
-        for enc in ("utf-8", "cp949", "euc-kr"):
-            try: return raw.decode(enc)
-            except: continue
-        return raw.decode("utf-8", errors="ignore")
-    except Exception as e:
-        print(f"HTML 추출 실패 ({rcept_no}): {e}")
-        return ""
+        html_file = next(n for n in zf.namelist() if n.lower().endswith((".html", ".htm")))
+        soup = BeautifulSoup(zf.read(html_file).decode("utf-8", errors="ignore"), "lxml")
+        text = soup.get_text(" ").replace("\n", " ")
+        m = re.search(r"(배정대상자|제3자\s*배정대상자|투자자)\s*[:：]?\s*([가-힣a-zA-Z0-9\s㈜]+)", text)
+        return m.group(2)[:40].strip() if m else ""
+    except: return ""
 
-def parse_html_content(html: str, report_type: str) -> dict:
-    """다운받은 HTML 표(Table)와 텍스트를 분석하여 필요한 19개 필드값을 긁어냅니다."""
-    out = {
-        "board_date": "", "method": "", "qty": "", "issue_price": "", 
-        "base_price": "", "total_amount": "", "discount": "", "pre_qty": "", 
-        "sub_date": "", "pay_date": "", "purpose": "", "investor": "", "underwriter": ""
-    }
+# --- [5] 행 데이터 조립 (JSON 데이터 우선 매핑) ---
+def build_row(r_type, list_item, data, investor):
+    rn = clean_str(list_item.get("rcept_no"))
+    cn = clean_str(list_item.get("corp_name"))
+    mr = {"Y": "KOSPI", "K": "KOSDAQ", "N": "KONEX", "E": "기타"}.get(list_item.get("corp_cls"), list_item.get("corp_cls"))
+    rpt = clean_str(list_item.get("report_nm"))
+    bd = clean_str(data.get("bddd"))
+
+    # 자금 조달 목적 억원 단위 변환
+    purposes = [amount_eok(data.get(k)) for k in ["fdpp_fclt", "fdpp_bsninh", "fdpp_op", "fdpp_dtrp", "fdpp_ocsa", "fdpp_etc"]]
     
-    if not html: return out
-    
-    soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(" ").replace("\n", " ")
+    uw_inv = clean_str(data.get("rpmcmp")) if data.get("rpmcmp") else investor
 
-    # 1. 정규식 텍스트 파싱 (투자자, 주관사, 이사회결의일 등)
-    investor_match = re.search(r"(배정대상자|제3자\s*배정대상자|투자자)\s*[:：]?\s*([가-힣a-zA-Z0-9\s㈜]+)", text)
-    if investor_match: out["investor"] = investor_match.group(2)[:30].strip()
-    
-    underwriter_match = re.search(r"(주관회사|대표주관회사|인수회사)\s*[:：]?\s*([가-힣a-zA-Z0-9\s㈜]+증권)", text)
-    if underwriter_match: out["underwriter"] = underwriter_match.group(2)[:30].strip()
-    
-    board_match = re.search(r"이사회\s*결의일.*?(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
-    if board_match:
-        out["board_date"] = f"{board_match.group(1)}-{int(board_match.group(2)):02d}-{int(board_match.group(3)):02d}"
+    if r_type == "유상증자":
+        return [
+            rn, cn, mr, rpt, bd, clean_str(data.get("ic_mthn")), 
+            clean_str(data.get("nstk_ostk_cnt")), clean_str(data.get("nstk_estk_cnt")),
+            clean_str(data.get("fv_ps")), clean_str(data.get("tisstk_prc")),
+            clean_str(data.get("bfic_tisstk_ostk")), clean_str(data.get("bfic_tisstk_estk")),
+            *purposes, clean_str(data.get("sbscpn_bgd")), clean_str(data.get("pymdt")), investor
+        ]
+    elif r_type == "전환사채":
+        return [
+            rn, cn, mr, rpt, bd, clean_str(data.get("bd_tm")), clean_str(data.get("bd_knd")), clean_str(data.get("bdis_mthn")),
+            clean_str(data.get("bd_fta")), clean_str(data.get("bd_intr_ex")), clean_str(data.get("bd_intr_sf")), clean_str(data.get("bd_mtd")),
+            *purposes, clean_str(data.get("cv_rt")), clean_str(data.get("cv_prc")), clean_str(data.get("act_mktprcfl_cvprc_lwtrsprc")),
+            clean_str(data.get("cvrqpd_bgd")), clean_str(data.get("cvrqpd_edd")), clean_str(data.get("sbd")), clean_str(data.get("pymd")), uw_inv
+        ]
+    elif r_type == "교환사채":
+        return [
+            rn, cn, mr, rpt, bd, clean_str(data.get("bd_tm")), clean_str(data.get("bd_knd")), clean_str(data.get("bdis_mthn")),
+            clean_str(data.get("bd_fta")), clean_str(data.get("bd_intr_ex")), clean_str(data.get("bd_intr_sf")), clean_str(data.get("bd_mtd")),
+            *purposes, clean_str(data.get("ex_rt")), clean_str(data.get("ex_prc")), clean_str(data.get("exrqpd_bgd")),
+            clean_str(data.get("exrqpd_edd")), clean_str(data.get("sbd")), clean_str(data.get("pymd")), uw_inv
+        ]
 
-    # 2. Pandas를 이용한 표(Table) 데이터 파싱
-    try:
-        dfs = pd.read_html(io.StringIO(html))
-        for df in dfs:
-            df = df.fillna("").astype(str)
-            for _, row in df.iterrows():
-                row_vals = [normalize_ws(v) for v in row.tolist()]
-                row_str = " ".join(row_vals)
-                
-                # 자금조달 목적 파싱 (억원 단위 변환)
-                if "자금조달의 목적" in row_str or "시설자금" in row_str or "운영자금" in row_str:
-                    purposes = []
-                    total = 0
-                    for k, label in [("시설자금", "시설"), ("운영자금", "운영"), ("영업양수자금", "영업양수"), 
-                                     ("채무상환자금", "채무상환"), ("타법인 증권 취득자금", "타법인증권취득"), ("기타자금", "기타")]:
-                        for i, cell in enumerate(row_vals):
-                            if k in cell and i + 1 < len(row_vals):
-                                val = extract_number(row_vals[i+1])
-                                if val:
-                                    eok = round(int(val) / 100_000_000, 2)
-                                    if eok > 0:
-                                        purposes.append(f"{label}:{eok}억")
-                                        total += int(val)
-                    if purposes: out["purpose"] = ", ".join(purposes)
-                    if total > 0 and not out["total_amount"]: out["total_amount"] = str(round(total / 100_000_000, 2))
-
-                # 기타 주요 항목 추출 로직
-                for i, cell in enumerate(row_vals):
-                    if not cell: continue
-                    next_val = row_vals[i+1] if i + 1 < len(row_vals) else ""
-                    
-                    if any(x in cell for x in ["증자방식", "사채발행방법"]) and not out["method"]:
-                        out["method"] = next_val
-                    elif any(x in cell for x in ["신주발행가액", "전환가액", "교환가액"]) and not out["issue_price"]:
-                        out["issue_price"] = extract_number(next_val)
-                    elif "기준주가" in cell and not out["base_price"]:
-                        out["base_price"] = extract_number(next_val)
-                    elif any(x in cell for x in ["할인율", "할증율"]) and not out["discount"]:
-                        out["discount"] = next_val
-                    elif any(x in cell for x in ["청약기일", "청약시작일"]) and not out["sub_date"]:
-                        out["sub_date"] = next_val.replace("년", "-").replace("월", "-").replace("일", "").replace(" ", "")
-                    elif "납입기일" in cell and not out["pay_date"]:
-                        out["pay_date"] = next_val.replace("년", "-").replace("월", "-").replace("일", "").replace(" ", "")
-                    elif any(x in cell for x in ["사채의 권면총액", "신주의 수"]) and not out["qty"]:
-                        out["qty"] = extract_number(next_val)
-                    elif "증자전 발행주식총수" in cell and not out["pre_qty"]:
-                        out["pre_qty"] = extract_number(next_val)
-                        
-    except Exception as e:
-        print(f"표 분석 중 에러 (텍스트 기반으로만 진행): {e}")
-
-    # 증자비율 계산
-    if out["qty"] and out["pre_qty"] and report_type == "유상증자":
-        try:
-            out["ratio"] = str(round((int(out["qty"]) / int(out["pre_qty"])) * 100, 2))
-        except:
-            out["ratio"] = ""
-    else:
-        out["ratio"] = ""
-
-    return out
-
-def build_row(list_item: dict, report_type: str, parsed: dict):
-    rcept_no = list_item.get("rcept_no", "")
-    corp_name = list_item.get("corp_name", "")
-    market = list_item.get("corp_cls", "")
-    market = {"Y": "KOSPI", "K": "KOSDAQ", "N": "KONEX", "E": "ETC"}.get(market, market)
-    report_nm = list_item.get("report_nm", "")
-
-    return [
-        rcept_no, corp_name, market, report_nm,
-        parsed["board_date"], parsed["method"], report_type,
-        parsed["qty"], parsed["issue_price"], parsed["base_price"], parsed["total_amount"], parsed["discount"],
-        parsed["pre_qty"], parsed.get("ratio", ""), parsed["sub_date"], parsed["pay_date"],
-        parsed["purpose"], parsed["investor"], parsed["underwriter"]
-    ]
-
+# --- [6] 메인 엔진 ---
 def main():
-    require_env("DART_API_KEY", DART_API_KEY)
-    require_env("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDENTIALS_JSON), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(GOOGLE_SHEET_ID)
 
     tz = ZoneInfo(TIMEZONE)
     today = datetime.now(tz).date()
-    bgn = today - timedelta(days=LOOKBACK_DAYS)
-    bgn_de = bgn.strftime("%Y%m%d")
-    end_de = today.strftime("%Y%m%d")
+    bgn_de = (today - timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
 
-    gc = get_gsheet_client()
-    sh = gc.open_by_key(GOOGLE_SHEET_ID)
+    seen = load_seen()
+    worksheets = {name: get_or_create_ws(sh, name) for name in HEADERS.keys()}
+    sheet_seen = {name: set(worksheets[name].col_values(1)[1:]) for name in HEADERS.keys()}
 
-    sheet_names = ["유상증자", "전환사채", "교환사채"]
-    worksheets = {}
-    processed_rcepts = {}
+    # 공시 목록 검색 (list.json)
+    list_res = requests.get(LIST_URL, params={"crtfc_key": DART_API_KEY, "bgn_de": bgn_de, "page_count": "100"}).json()
+    items = list_res.get("list", [])
+    print(f"📋 DART 목록 검색 완료: {len(items)}건 확인됨.")
 
-    for name in sheet_names:
-        ws = get_or_create_worksheet(sh, name)
-        ensure_header(ws)
-        worksheets[name] = ws
-        processed_rcepts[name] = get_processed_rcept_set(ws)
-
-    # 1. list.json으로 전체 공시 검색
-    items = dart_list_json(bgn_de=bgn_de, end_de=end_de)
-    print(f"📋 DART 목록 검색(list.json) 완료: 총 {len(items)}건 확인됨.")
-    
-    rows_to_append = {"유상증자": [], "전환사채": [], "교환사채": []}
+    rows_to_add = {name: [] for name in HEADERS.keys()}
+    newly_processed = set()
 
     for it in items:
-        report_nm = it.get("report_nm", "")
-        
-        report_type = ""
-        if "유상" in report_nm and "결정" in report_nm: report_type = "유상증자"
-        elif "전환사채" in report_nm and "결정" in report_nm: report_type = "전환사채"
-        elif "교환사채" in report_nm and "결정" in report_nm: report_type = "교환사채"
-        else: continue 
+        rpt = it.get("report_nm", "")
+        r_type = ""
+        if "유상" in rpt and "결정" in rpt: r_type = "유상증자"
+        elif "전환사채" in rpt and "결정" in rpt: r_type = "전환사채"
+        elif "교환사채" in rpt and "결정" in rpt: r_type = "교환사채"
+        else: continue
 
-        rcept_no = it.get("rcept_no")
-        corp_name = it.get("corp_name", "알수없음")
-        print(f"\n🔍 타겟 공시 발견: [{corp_name}] {report_nm}")
-
-        if rcept_no in processed_rcepts[report_type]:
-            print("   -> 🚫 이미 기록된 공시입니다. 패스.")
+        r_no = it.get("rcept_no")
+        # 시트나 seen.json에 있으면 중복 수집 방지 (테스트 시 삭제하면 다시 가져옴)
+        if r_no in seen or r_no in sheet_seen.get(r_type, set()):
             continue
-            
-        # 2. document.xml로 원본 HTML 실시간 다운로드 및 분석 (지연 없음!)
-        print("   -> 📥 원본 HTML 문서 다운로드 및 데이터 추출 중...")
-        html_content = get_document_html(rcept_no)
-        parsed_data = parse_html_content(html_content, report_type)
-        
-        row = build_row(it, report_type, parsed_data)
-        rows_to_append[report_type].append(row)
-        print("   -> ✅ 데이터 추출 완료 및 시트 대기열 추가.")
 
-    print("\n[시트 업데이트 결과]")
-    for name in sheet_names:
-        if rows_to_append[name]:
-            worksheets[name].append_rows(rows_to_append[name], value_input_option="USER_ENTERED")
-            print(f"✅ {name} 시트: {len(rows_to_append[name])}건 추가 완료.")
+        print(f"🔍 신규 타겟 분석: [{it.get('corp_name')}] {rpt}")
+        
+        # 💡 핵심: 전용 상세 JSON API 호출 (piicDecsn, cvbdIsDecsn, exbdIsDecsn)
+        detail_res = requests.get(DETAIL_APIS[r_type], params={"crtfc_key": DART_API_KEY, "corp_code": it.get("corp_code")}).json()
+        detail = next((d for d in detail_res.get("list", []) if d.get("rcept_no") == r_no), None)
+        
+        if detail:
+            investor = get_investor_from_html(r_no) # 투자자 정보만 HTML에서 보조적으로 추출
+            row = build_row(r_type, it, detail, investor)
+            rows_to_append = rows_to_add[r_type]
+            rows_to_append.append(row)
+            newly_processed.add(r_no)
+            print(f"   -> ✅ 상세 수치 매핑 완료")
         else:
-            print(f"✅ {name} 시트: 새로 추가할 내용 없음.")
+            print(f"   -> ⏳ 상세 API 데이터 지연 중 (다음 실행 시 자동 재시도)")
+
+    for name, data_rows in rows_to_add.items():
+        if data_rows:
+            worksheets[name].append_rows(data_rows, value_input_option="USER_ENTERED")
+            print(f"📊 {name} 시트에 {len(data_rows)}건 업데이트 완료.")
+
+    if newly_processed:
+        seen.update(newly_processed)
+        save_seen(seen)
 
 if __name__ == "__main__":
     main()

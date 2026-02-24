@@ -2,9 +2,13 @@ name: DART Auto Updater
 
 on:
   schedule:
-    # 10분마다 실행 (UTC 기준)
-    - cron: '*/10 * * * *'
-  workflow_dispatch: # 수동으로 실행할 수 있는 버튼 활성화
+    # 1. KST 07:30 ~ 07:50 (UTC 22:30 ~ 22:50)
+    - cron: '30-59/10 22 * * 1-5' 
+    # 2. KST 08:00 ~ 19:50 (UTC 23:00 ~ 10:50)
+    - cron: '*/10 23,0-10 * * 1-5'
+    # 3. KST 20:00 (UTC 11:00)
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   run-python-script:

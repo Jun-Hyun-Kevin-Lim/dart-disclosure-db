@@ -13,9 +13,9 @@ from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
 
-DART_API_KEY = os.getenv("DART_API_KEY", "18d878b167bd1e9f2ec1f7534b543e79463a72ac").strip()
+DART_API_KEY = os.getenv("DART_API_KEY", "").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "https://docs.google.com/spreadsheets/d/1CiJSHmTdHGXD_665TcbEB6GEKJao0WJrzb3UGlsfMBo/edit?gid=0#gid=0").strip()
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
 WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "DART").strip()
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))

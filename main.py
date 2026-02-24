@@ -31,7 +31,7 @@ def get_google_sheets():
     client = gspread.authorize(creds)
     doc = client.open_by_key(GOOGLE_SHEET_ID)
     return {
-        "유상증자": doc.worksheet("유상증자결정"),
+        "유상증자": doc.worksheet("유상증자"),
         "전환사채": doc.worksheet("전환사채"),
         "교환사채": doc.worksheet("교환사채")
     }
@@ -92,7 +92,7 @@ def main():
         dart_link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
         # --- 1. 유상증자 처리 ---
-        if any(kw in report_nm for kw in PIIC_KEYWORDS) and rcept_no not in existing_rcepts["유상증자결정"]:
+        if any(kw in report_nm for kw in PIIC_KEYWORDS) and rcept_no not in existing_rcepts["유상증자"]:
             detail = fetch_detail_data("piicDecsn.json", rcept_no, corp_code)
             if detail:
                 row = [
@@ -105,7 +105,7 @@ def main():
                     won_to_uk(detail.get("fdpp_ocsa", "")), won_to_uk(detail.get("fdpp_etc", "")),
                     detail.get("sbd", ""), detail.get("pymd", ""), detail.get("tp_allo_cprpty", ""), dart_link
                 ]
-                rows_to_add["유상증자결정"].append(row)
+                rows_to_add["유상증자"].append(row)
 
         # --- 2. 전환사채 처리 ---
         elif any(kw in report_nm for kw in CVBD_KEYWORDS) and rcept_no not in existing_rcepts["전환사채"]:

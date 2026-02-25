@@ -157,12 +157,12 @@ def get_and_update_yusang():
     df_combined = pd.concat(detail_dfs, ignore_index=True)
     
     df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
-    df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls']], on='rcept_no', how='left')
+    
+    # 💡 [버그 해결] 여기서 'report_nm'(보고서명)을 빼먹어서 빈칸이 나왔었습니다! 지금은 추가했습니다.
+    df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
     
     worksheet = sh.worksheet('유상증자')
-    
-    # 💡 21번째 열(U열)에서 접수번호를 읽어와서 중복 방지!
-    existing_rcept_nos = worksheet.col_values(21) 
+    existing_rcept_nos = worksheet.col_values(21) # 21번째 접수번호 컬럼 확인
     
     new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
     
@@ -176,7 +176,7 @@ def get_and_update_yusang():
     for _, row in new_data_df.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        report_nm = row.get('report_nm', '') # 💡 보고서명 추출!
+        report_nm = row.get('report_nm', '') # 이제 정상적으로 보고서명이 들어옵니다!
         
         print(f" -> {corp_name} 스마트 데이터 탐색 적용 중...")
         
@@ -220,35 +220,35 @@ def get_and_update_yusang():
         
         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
         
-        # 💡 총 21칸으로 업데이트!
+        # 총 21칸 완성
         new_row = [
-            corp_name,                  # 1. 회사명
-            report_nm,                  # 2. 보고서명 (새로 추가됨!)
-            market,                     # 3. 상장시장
-            xml_data['board_date'],     # 4. 최초 이사회결의일
-            method,                     # 5. 증자방식
-            product,                    # 6. 발행상품
-            new_shares_str,             # 7. 신규발행주식수
-            xml_data['issue_price'],    # 8. 확정발행가
-            xml_data['base_price'],     # 9. 기준주가
-            total_amt_uk,               # 10. 확정발행금액
-            xml_data['discount'],       # 11. 할인/할증률
-            old_shares_str,             # 12. 증자전 주식수
-            ratio,                      # 13. 증자비율
-            xml_data['pay_date'],       # 14. 납입일
-            xml_data['div_date'],       # 15. 배당기산일
-            xml_data['list_date'],      # 16. 상장예정일
-            xml_data['board_date'],     # 17. 이사회결의일
-            purpose_str,                # 18. 자금용도
-            xml_data['investor'],       # 19. 투자자
-            link,                       # 20. 링크
-            rcept_no                    # 21. 접수번호 (U열)
+            corp_name,                  # 1
+            report_nm,                  # 2 (정상 작동!)
+            market,                     # 3
+            xml_data['board_date'],     # 4
+            method,                     # 5
+            product,                    # 6
+            new_shares_str,             # 7
+            xml_data['issue_price'],    # 8
+            xml_data['base_price'],     # 9
+            total_amt_uk,               # 10
+            xml_data['discount'],       # 11
+            old_shares_str,             # 12
+            ratio,                      # 13
+            xml_data['pay_date'],       # 14
+            xml_data['div_date'],       # 15
+            xml_data['list_date'],      # 16
+            xml_data['board_date'],     # 17
+            purpose_str,                # 18
+            xml_data['investor'],       # 19
+            link,                       # 20
+            rcept_no                    # 21 (접수번호 U열)
         ]
         
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: '보고서명'이 추가된 신규 데이터 {len(data_to_add)}건 추가 완료!")
+    print(f"✅ 유상증자: '보고서명' 추가 오류 수정 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

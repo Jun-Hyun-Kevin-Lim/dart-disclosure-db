@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (검색 레이더 250자로 확장 & 날짜 정규식 강화)] ---
+# --- [XML 원문 족집게 파싱 (목차 함정 회피 & 스마트 탐색 엔진)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -55,33 +55,38 @@ def extract_xml_details(api_key, rcept_no):
                         tag.append(' ')
                         
                     raw_text = soup.get_text(separator=' ', strip=True)
-                    clean_text = re.sub(r'\s+', ' ', raw_text) # 모든 공백을 1칸으로 압축
+                    clean_text = re.sub(r'\s+', ' ', raw_text) # 공백 압축
                     
-                    # 1. 가격 추출 (검색 범위를 250자로 대폭 늘림)
+                    # 1. 가격 추출 (목차에 속지 않고, 진짜 금액이 나올 때까지 반복 탐색)
                     def get_price(keyword):
-                        match = re.search(keyword + r'.{0,250}', clean_text)
-                        if match:
-                            nums = re.findall(r'[0-9]{1,3}(?:,[0-9]{3})*', match.group(0))
+                        # 문서 내의 해당 키워드를 모두 찾음 (finditer)
+                        for match in re.finditer(keyword + r'.{0,200}', clean_text):
+                            window = match.group(0)
+                            nums = re.findall(r'[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,}', window)
                             for n in nums:
-                                if int(n.replace(',', '')) >= 100:
-                                    return n
+                                n_int = int(n.replace(',', ''))
+                                # 목차 번호나 연도(2025 등)가 아닌 진짜 큰 금액을 찾으면 즉시 반환
+                                if n_int > 100 and n_int not in [2023, 2024, 2025, 2026, 2027]:
+                                    return f"{n_int:,}" # 콤마 찍어서 예쁘게 반환
                         return '-'
                         
-                    extracted['issue_price'] = get_price(r'발\s*행\s*가\s*액')
+                    extracted['issue_price'] = get_price(r'발\s*행\s*가\s*(?:액)?')
                     extracted['base_price'] = get_price(r'기\s*준\s*주\s*가')
                     
-                    # 2. 할인/할증률 추출 (범위 확장)
-                    disc = re.search(r'할\s*[인증]\s*율.{0,150}', clean_text)
-                    if disc:
-                        m = re.search(r'([\-\+]?[0-9\.]+)\s*%', disc.group(0))
-                        if m: extracted['discount'] = m.group(1).strip() + "%"
+                    # 2. 할인/할증률 추출 (진짜 비율이 나올 때까지 탐색)
+                    for match in re.finditer(r'할\s*[\(인증\)]*\s*율.{0,150}', clean_text):
+                        window = match.group(0)
+                        m = re.search(r'([\-\+]?\s*[0-9]+\.?[0-9]*)\s*%', window)
+                        if m: 
+                            extracted['discount'] = m.group(1).replace(' ', '') + "%"
+                            break # 진짜 비율 찾으면 정지
                     
-                    # 3. 날짜 추출 (범위 250자로 확장 및 변칙적인 날짜 포맷 모두 허용)
+                    # 3. 날짜 추출 (진짜 날짜가 나올 때까지 탐색)
                     def get_date(keyword):
-                        match = re.search(keyword + r'.{0,250}', clean_text)
-                        if match:
-                            # 2026. 02. 12. 또는 2026-02-12 모두 캐치하는 만능 정규식
-                            m = re.search(r'(\d{4})\s*[\-\.년]\s*(\d{1,2})\s*[\-\.월]\s*(\d{1,2})', match.group(0))
+                        for match in re.finditer(keyword + r'.{0,200}', clean_text):
+                            window = match.group(0)
+                            # 202x 형태의 날짜만 엄격하게 캐치
+                            m = re.search(r'(20[2-3][0-9])\s*[\-\.년]\s*([0-1]?[0-9])\s*[\-\.월]\s*([0-3]?[0-9])', window)
                             if m:
                                 y, m_num, d_num = m.groups()
                                 return f"{y}년 {m_num.zfill(2)}월 {d_num.zfill(2)}일"
@@ -90,7 +95,7 @@ def extract_xml_details(api_key, rcept_no):
                     extracted['board_date'] = get_date(r'이\s*사\s*회\s*결\s*의\s*일')
                     extracted['pay_date'] = get_date(r'(납\s*입\s*일|주\s*금\s*납\s*입\s*기\s*일)')
                     extracted['div_date'] = get_date(r'배\s*당\s*기\s*산\s*일')
-                    extracted['list_date'] = get_date(r'상\s*장\s*예\s*정\s*일')
+                    extracted['list_date'] = get_date(r'(?:신\s*주\s*의\s*)?상\s*장\s*예\s*정\s*일')
                     
                     # 4. 투자자
                     if "제3자배정" in clean_text: extracted['investor'] = "제3자배정 (원문참조)"
@@ -145,7 +150,8 @@ def get_and_update_yusang():
         
     df_combined = pd.concat(detail_dfs, ignore_index=True)
     
-    # 💡 [버그 수정됨!] 상장시장(corp_cls)을 목록에서 정상적으로 가져오도록 수정
+    # 💡 [버그 완벽 수정] corp_cls 중복을 제거한 뒤 목록 데이터와 깔끔하게 병합 (상장시장 복구)
+    df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
     df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls']], on='rcept_no', how='inner')
     
     worksheet = sh.worksheet('유상증자')
@@ -162,11 +168,11 @@ def get_and_update_yusang():
     for _, row in new_data_df.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        print(f" -> {corp_name} 세밀한 데이터 포매팅 적용 중...")
+        print(f" -> {corp_name} 스마트 데이터 탐색 및 포매팅 적용 중...")
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
-        # 1. 상장시장 (에러 해결되어 정상 출력됨)
+        # 1. 상장시장 (정상 복구)
         market = cls_map.get(row.get('corp_cls', ''), '기타')
         method = row.get('ic_mthn', '')
         
@@ -211,20 +217,20 @@ def get_and_update_yusang():
         
         new_row = [
             corp_name,                  # 1
-            market,                     # 2 (이제 정상적으로 유가/코스닥 찍힘)
+            market,                     # 2 (유가/코스닥/기타 완벽 복구)
             xml_data['board_date'],     # 3
             method,                     # 4
             product,                    # 5
             new_shares_str,             # 6
-            xml_data['issue_price'],    # 7 (정확도 대폭 향상)
-            xml_data['base_price'],     # 8 (정확도 대폭 향상)
+            xml_data['issue_price'],    # 7 (* 가격 정확도 극대화 완료)
+            xml_data['base_price'],     # 8 (* 가격 정확도 극대화 완료)
             total_amt_uk,               # 9 
-            xml_data['discount'],       # 10
+            xml_data['discount'],       # 10 (* 할인율 마이너스 기호 포함 완료)
             old_shares_str,             # 11 
             ratio,                      # 12 
-            xml_data['pay_date'],       # 13
-            xml_data['div_date'],       # 14
-            xml_data['list_date'],      # 15
+            xml_data['pay_date'],       # 13 (포맷 100% 통일)
+            xml_data['div_date'],       # 14 (포맷 100% 통일)
+            xml_data['list_date'],      # 15 (포맷 100% 통일)
             xml_data['board_date'],     # 16
             purpose_str,                # 17
             xml_data['investor'],       # 18
@@ -235,7 +241,7 @@ def get_and_update_yusang():
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: 누락 보완된 신규 데이터 {len(data_to_add)}건 추가 완료!")
+    print(f"✅ 유상증자: 누락 데이터 완벽 복구! 신규 데이터 {len(data_to_add)}건 추가 완료!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

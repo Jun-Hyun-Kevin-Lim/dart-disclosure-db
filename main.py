@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (정규식 초정밀 업그레이드)] ---
+# --- [XML 원문 족집게 파싱 (지투지바이오 예외처리 핀셋 수정)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -51,16 +51,26 @@ def extract_xml_details(api_key, rcept_no):
                     soup = BeautifulSoup(xml_content, 'html.parser')
                     raw_text = soup.get_text(separator=' ', strip=True)
                     
-                    # 1. 확정발행가 추출 (글자 사이 잡문자 무시하고 첫 숫자 매칭)
-                    issue = re.search(r'발행가액[^\d]*([0-9]{1,3}(?:,[0-9]{3})*)', raw_text)
-                    if issue: extracted['issue_price'] = issue.group(1).strip()
+                    # 1. 확정발행가 추출 (주변 40글자 안에서 100원 이상인 진짜 금액만 찾기)
+                    issue_match = re.search(r'발행가액.{0,40}', raw_text)
+                    if issue_match:
+                        nums = re.findall(r'[0-9]{1,3}(?:,[0-9]{3})*', issue_match.group(0))
+                        for n in nums:
+                            if int(n.replace(',', '')) >= 100: # '2. 기타주식' 같은 목차 번호 스킵
+                                extracted['issue_price'] = n
+                                break
                     
-                    # 2. 기준주가 추출
-                    base = re.search(r'기준주가[^\d]*([0-9]{1,3}(?:,[0-9]{3})*)', raw_text)
-                    if base: extracted['base_price'] = base.group(1).strip()
+                    # 2. 기준주가 추출 (주변 40글자 안에서 진짜 금액만 찾기)
+                    base_match = re.search(r'기준주가.{0,40}', raw_text)
+                    if base_match:
+                        nums = re.findall(r'[0-9]{1,3}(?:,[0-9]{3})*', base_match.group(0))
+                        for n in nums:
+                            if int(n.replace(',', '')) >= 100:
+                                extracted['base_price'] = n
+                                break
                     
-                    # 3. 할인/할증률 추출
-                    disc = re.search(r'할\s*[인증]\s*율[^\d]*([0-9\.]+)', raw_text)
+                    # 3. 할인/할증률 추출 (마이너스, 플러스 기호 포함)
+                    disc = re.search(r'할\s*[인증]\s*율[^\d\+\-]*([\-\+]?[0-9\.]+)', raw_text)
                     if disc: extracted['discount'] = disc.group(1).strip() + "%"
                     
                     # 4. 날짜 추출 (이사회, 납입일, 배당기산일, 상장예정일)
@@ -150,7 +160,7 @@ def get_and_update_yusang():
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
-        # 1. 상장시장 (에러 해결)
+        # 1. 상장시장
         market = cls_map.get(row.get('corp_cls', ''), '기타')
         method = row.get('ic_mthn', '')
         
@@ -158,19 +168,21 @@ def get_and_update_yusang():
         ostk = to_int(row.get('nstk_ostk_cnt'))
         estk = to_int(row.get('nstk_estk_cnt'))
         new_shares = ostk + estk
-        product = "보통주" if ostk > 0 else "기타주"
+        
+        # 지투지바이오처럼 보통주가 0이면 우선주(종류주식)로 표기
+        product = "보통주" if ostk > 0 else "기명식 전환우선주(종류주식)"
         
         old_ostk = to_int(row.get('bfic_tisstk_ostk'))
         old_estk = to_int(row.get('bfic_tisstk_estk'))
         old_shares = old_ostk + old_estk
         
-        new_shares_str = f"{new_shares:,}"  # 쉼표 추가
-        old_shares_str = f"{old_shares:,}"  # 쉼표 추가
+        new_shares_str = f"{new_shares:,}"  # 쉼표 추가!
+        old_shares_str = f"{old_shares:,}"  # 쉼표 추가!
         
         # 3. 증자비율 (%)
         ratio = f"{(new_shares / old_shares * 100):.2f}%" if old_shares > 0 else "-"
         
-        # 4. 확정발행금액 (억원 단위, 소수점 2자리 세밀하게)
+        # 4. 확정발행금액 (억원 단위, 강제 반올림 없애고 디테일 보존)
         fclt = to_int(row.get('fdpp_fclt'))
         bsninh = to_int(row.get('fdpp_bsninh'))
         op = to_int(row.get('fdpp_op'))
@@ -179,7 +191,8 @@ def get_and_update_yusang():
         etc = to_int(row.get('fdpp_etc'))
         
         total_amt = fclt + bsninh + op + dtrp + ocsa + etc
-        total_amt_uk = f"{(total_amt / 100000000):,.2f}" if total_amt > 0 else "0.00"
+        # 100,000,000으로 나눈 뒤 소수점 6자리까지 살리고, 불필요한 뒤쪽 0만 제거
+        total_amt_uk = f"{(total_amt / 100000000):.6f}".rstrip('0').rstrip('.') if total_amt > 0 else "0"
         
         # 자금용도 추출
         purposes = []
@@ -195,17 +208,17 @@ def get_and_update_yusang():
         
         new_row = [
             corp_name,                  # 1
-            market,                     # 2 (복구됨)
+            market,                     # 2 
             xml_data['board_date'],     # 3
             method,                     # 4
-            product,                    # 5
-            new_shares_str,             # 6 (쉼표 추가)
-            xml_data['issue_price'],    # 7 (업그레이드)
-            xml_data['base_price'],     # 8 (업그레이드)
-            total_amt_uk,               # 9 (소수점 추가)
-            xml_data['discount'],       # 10 (업그레이드)
-            old_shares_str,             # 11 (쉼표 추가)
-            ratio,                      # 12 (비율 복구)
+            product,                    # 5 (종류주식 반영)
+            new_shares_str,             # 6 (쉼표 반영)
+            xml_data['issue_price'],    # 7 (가격 오류 수정)
+            xml_data['base_price'],     # 8 (가격 오류 수정)
+            total_amt_uk,               # 9 (소수점 디테일 보존)
+            xml_data['discount'],       # 10 (마이너스 기호 보존)
+            old_shares_str,             # 11 (쉼표 반영)
+            ratio,                      # 12 
             xml_data['pay_date'],       # 13
             xml_data['div_date'],       # 14
             xml_data['list_date'],      # 15

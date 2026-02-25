@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [채권 전용 XML 원문 족집게 파싱 (콜옵션, 풋옵션, 투자자 등)] ---
+# --- [채권 전용 XML 원문 족집게 파싱 (콜/풋옵션 내용 추출 강화)] ---
 def extract_bond_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -56,15 +56,17 @@ def extract_bond_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. Put Option (조기상환청구권)
-                    if re.search(r'조기상환\s*청구권', clean_text):
-                        extracted['put_option'] = '있음'
+                    # 💡 1. Put Option (조기상환청구권) : 키워드 포함 뒤 150자 추출
+                    put_match = re.search(r'(조기상환\s*청구권.{0,150})', clean_text)
+                    if put_match:
+                        extracted['put_option'] = put_match.group(1).strip() + "..."
                         
-                    # 2. Call Option (매도청구권) 및 Call 비율
-                    call_match = re.search(r'매도청구권.{0,150}', clean_text)
+                    # 💡 2. Call Option (매도청구권) : 키워드 포함 뒤 150자 추출
+                    call_match = re.search(r'(매도\s*청구권.{0,150})', clean_text)
                     if call_match:
-                        extracted['call_option'] = '있음'
-                        # 비율 추출 시도 (예: 30%, 40% 등)
+                        extracted['call_option'] = call_match.group(1).strip() + "..."
+                        
+                        # Call 비율은 추출된 텍스트 안에서 % 숫자를 찾음
                         ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', call_match.group(0))
                         if ratio_match:
                             extracted['call_ratio'] = ratio_match.group(1) + '%'

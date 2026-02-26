@@ -51,6 +51,15 @@ def extract_xml_details(api_key, rcept_no):
                     soup = BeautifulSoup(xml_content, 'html.parser')
                     raw_text = soup.get_text(separator=' ', strip=True)
                     
+                    # 💡 [추가] 날짜를 YYYY년 MM월 DD일 로 깔끔하게 강제 포맷팅하는 헬퍼 함수
+                    def fix_date(raw_date_str):
+                        if not raw_date_str: return '-'
+                        # 숫자만 3개(연, 월, 일) 뽑아냄
+                        nums = re.findall(r'\d+', raw_date_str)
+                        if len(nums) >= 3:
+                            return f"{nums[0]}년 {nums[1].zfill(2)}월 {nums[2].zfill(2)}일"
+                        return raw_date_str + "일" # 숫자가 부족하면 임시방편으로 '일'만 붙임
+                    
                     # 1. 확정발행가 추출 (글자 사이 잡문자 무시하고 첫 숫자 매칭)
                     issue = re.search(r'발행가액[^\d]*([0-9]{1,3}(?:,[0-9]{3})*)', raw_text)
                     if issue: extracted['issue_price'] = issue.group(1).strip()
@@ -63,18 +72,18 @@ def extract_xml_details(api_key, rcept_no):
                     disc = re.search(r'할\s*[인증]\s*율[^\d\+\-]*([\-\+]?[0-9\.]+)', raw_text)
                     if disc: extracted['discount'] = disc.group(1).strip() + "%"
                     
-                    # 4. 날짜 추출 (이사회, 납입일, 배당기산일, 상장예정일)
+                    # 4. 날짜 추출 (이사회, 납입일, 배당기산일, 상장예정일) + 💡 fix_date 적용!
                     board = re.search(r'이사회결의일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
-                    if board: extracted['board_date'] = board.group(1).strip()
+                    if board: extracted['board_date'] = fix_date(board.group(1).strip())
                     
                     pay = re.search(r'납\s*입\s*일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
-                    if pay: extracted['pay_date'] = pay.group(1).strip()
+                    if pay: extracted['pay_date'] = fix_date(pay.group(1).strip())
                     
                     div = re.search(r'배당기산일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
-                    if div: extracted['div_date'] = div.group(1).strip()
+                    if div: extracted['div_date'] = fix_date(div.group(1).strip())
                     
                     list_d = re.search(r'상장\s*예정일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
-                    if list_d: extracted['list_date'] = list_d.group(1).strip()
+                    if list_d: extracted['list_date'] = fix_date(list_d.group(1).strip())
                     
                     # 5. 투자자
                     if "제3자배정" in raw_text: extracted['investor'] = "제3자배정 (원문참조)"
@@ -96,7 +105,7 @@ def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=7)).strftime('%Y%m%d')
 
-    print("최근 7일 유상증자 공시 탐색 중...")
+    print("최근 7일 유상증자 공시 탐색 중 (데이터 최신화 검증 로직 포함)...")
     
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
@@ -133,20 +142,27 @@ def get_and_update_yusang():
     df_merged = pd.merge(df_combined, df_filtered[['rcept_no']], on='rcept_no', how='inner')
     
     worksheet = sh.worksheet('유상증자')
-    existing_rcept_nos = worksheet.col_values(20) 
-    new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
     
-    if new_data_df.empty:
-        print("ℹ️ 새로 추가할 데이터가 없습니다.")
-        return
-        
+    # 💡 [추가] Recheck + Diff + Update 로직을 위한 기존 시트 데이터 전체 불러오기
+    all_sheet_data = worksheet.get_all_values()
+    existing_data_dict = {}
+    
+    # 구글 시트에 있는 데이터를 { '접수번호': { '행번호': 2, '데이터': ['값1', '값2'...] } } 형태로 메모리에 저장
+    for idx, row_data in enumerate(all_sheet_data):
+        if len(row_data) >= 20: # 20번째 칸(T열)이 접수번호
+            rcept_val = str(row_data[19]).strip()
+            existing_data_dict[rcept_val] = {
+                'row_idx': idx + 1, # 구글 시트는 1행부터 시작하므로 +1
+                'data': [str(x).strip() for x in row_data] # 공백 제거 후 문자열로 저장
+            }
+            
     data_to_add = []
     cls_map = {'Y': '유가', 'K': '코스닥', 'N': '코넥스', 'E': '기타'}
     
-    for _, row in new_data_df.iterrows():
+    # 💡 [수정] 필터링 없이 일단 최근 7일치 공시 전체를 훑으며 변경사항(Diff)이 있는지 검사합니다.
+    for _, row in df_merged.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        print(f" -> {corp_name} 세밀한 데이터 포매팅 적용 중...")
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
@@ -193,6 +209,7 @@ def get_and_update_yusang():
         
         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
         
+        # 새롭게 만들어낸 최신 팩트 데이터 한 줄
         new_row = [
             corp_name,                  # 1
             market,                     # 2 (복구됨)
@@ -216,10 +233,39 @@ def get_and_update_yusang():
             rcept_no                    # 20
         ]
         
-        data_to_add.append(new_row)
+        # 비교를 위해 모든 데이터를 문자열(String)로 변환
+        new_row_str = [str(x).strip() for x in new_row]
         
-    worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: 디테일이 살아있는 신규 데이터 {len(data_to_add)}건 추가 완료!")
+        # 💡 [핵심 로직] 기존 시트에 있는 데이터인지 검증 및 업데이트
+        if rcept_no in existing_data_dict:
+            existing_row_str = existing_data_dict[rcept_no]['data']
+            
+            # 길이를 맞춰서 1:1 비교를 수행합니다 (에러 방지용 패딩)
+            existing_row_str += [''] * (len(new_row_str) - len(existing_row_str))
+            existing_row_str = existing_row_str[:len(new_row_str)]
+            
+            # Diff 검사: 하나라도 값이 다르다면 업데이트 실행!
+            if new_row_str != existing_row_str:
+                row_idx = existing_data_dict[rcept_no]['row_idx']
+                try:
+                    worksheet.update(range_name=f'A{row_idx}:T{row_idx}', values=[new_row])
+                except TypeError:
+                    worksheet.update(f'A{row_idx}:T{row_idx}', [new_row])
+                print(f" 🔄 {corp_name}: 데이터 변경 감지! 최신 내용으로 자동 덮어쓰기 완료 (행: {row_idx})")
+            else:
+                print(f" ⏩ {corp_name}: 변경사항 없음 (패스)")
+                
+        else:
+            # 시트에 아예 없는 접수번호라면 신규 데이터 바구니에 담기
+            print(f" 🆕 {corp_name}: 신규 공시 발견! 추가 대기 중...")
+            data_to_add.append(new_row)
+        
+    # 신규 데이터가 있으면 맨 밑에 일괄 추가
+    if data_to_add:
+        worksheet.append_rows(data_to_add)
+        print(f"✅ 유상증자: 신규 데이터 {len(data_to_add)}건 일괄 추가 완료!")
+    else:
+        print("✅ 유상증자: 새로 추가할 공시는 없으며 데이터 최신화 점검을 마쳤습니다.")
 
 if __name__ == "__main__":
     get_and_update_yusang()

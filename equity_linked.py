@@ -214,7 +214,7 @@ def get_and_update_bonds():
             new_row = [
                 config['type'],                             # 1. 구분 (CB, BW, EB)
                 corp_name,                                  # 2. 회사명
-                market,                                     # 3. 상장시장
+                cls_map.get(row.get('corp_cls', ''), '기타'),# 3. 상장시장
                 str(row.get('bddd', '-')),                  # 4. 최초 이사회결의일
                 face_value_str,                             # 5. 권면총액(원)
                 str(row.get('bd_intr_ex', '-')),            # 6. Coupon (표면이자율)

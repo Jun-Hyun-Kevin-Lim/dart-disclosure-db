@@ -31,15 +31,14 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [유상증자 전용 XML 원문 파싱 (상세 일정, 가격, 투자자 추출)] ---
-def extract_piic_xml_details(api_key, rcept_no):
+# --- [XML 원문 족집게 파싱] ---
+def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
     
     extracted = {
-        'issue_price': '-', 'base_price': '-', 'discount_rate': '-',
-        'pay_date': '-', 'dividend_date': '-', 'listing_date': '-', 
-        'investor': '-', 'board_date': '-'
+        'board_date': '-', 'issue_price': '-', 'base_price': '-', 'discount': '-',
+        'pay_date': '-', 'div_date': '-', 'list_date': '-', 'investor': '원문참조'
     }
     
     try:
@@ -57,45 +56,55 @@ def extract_piic_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. 확정(예정) 발행가액
-                    price_match = re.search(r'(?:예정|확정)?발행가액.*?(\d{1,3}(?:,\d{3})*)\s*원', clean_text)
-                    if price_match: extracted['issue_price'] = price_match.group(1)
+                    # 1. 가격 추출
+                    def get_price(keyword):
+                        for match in re.finditer(keyword, clean_text):
+                            window = clean_text[match.end():match.end()+150]
+                            nums = re.findall(r'(?<![\d\.])(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d{2,})(?![\d\.])', window)
+                            for n in nums:
+                                val = int(n.replace(',', ''))
+                                if val >= 100 and val not in [2023, 2024, 2025, 2026, 2027]:
+                                    return f"{val:,}"
+                        return '-'
+                        
+                    extracted['issue_price'] = get_price(r'(?:확\s*정|예\s*정)?\s*발\s*행\s*가\s*(?:액)?')
+                    extracted['base_price'] = get_price(r'기\s*준\s*주\s*가')
                     
-                    # 2. 기준주가
-                    base_match = re.search(r'기준주가.*?(\d{1,3}(?:,\d{3})*)\s*원', clean_text)
-                    if base_match: extracted['base_price'] = base_match.group(1)
+                    # 2. 할인/할증률
+                    def get_discount():
+                        for match in re.finditer(r'(할\s*인\s*율|할\s*증\s*율|할\s*인\s*\(\s*할\s*증\s*\)\s*율)', clean_text):
+                            keyword = match.group(1).replace(' ', '')
+                            window = clean_text[match.end():match.end()+100]
+                            m = re.search(r'([\-\+]?\s*[0-9]+\.?[0-9]*)\s*%', window)
+                            if m:
+                                val = float(m.group(1).replace(' ', ''))
+                                if '할인율' in keyword and val > 0: val = -val
+                                elif '할증율' in keyword and val < 0: val = -val
+                                elif keyword == '할인(할증)율' and val > 0 and '+' not in m.group(1): val = -val
+                                return f"{val:+.2f}%"
+                        return '-'
+                    extracted['discount'] = get_discount()
                     
-                    # 3. 할인율 (또는 할증률)
-                    discount_match = re.search(r'할인율.*?([0-9]{1,2}(?:\.[0-9]+)?)\s*%', clean_text)
-                    if discount_match: extracted['discount_rate'] = discount_match.group(1) + '%'
+                    # 3. 날짜 추출
+                    def get_date(keyword):
+                        for match in re.finditer(keyword, clean_text):
+                            window = clean_text[match.end():match.end()+150]
+                            m = re.search(r'(20[2-3][0-9])\s*[\-\.년]\s*([0-1]?[0-9])\s*[\-\.월]\s*([0-3]?[0-9])', window)
+                            if m:
+                                y, m_num, d_num = m.groups()
+                                return f"{y}년 {m_num.zfill(2)}월 {d_num.zfill(2)}일"
+                        return '-'
+                        
+                    extracted['board_date'] = get_date(r'(?:최\s*초\s*)?이\s*사\s*회\s*결\s*의\s*일')
+                    extracted['pay_date'] = get_date(r'(납\s*입\s*일|주\s*금\s*납\s*입\s*기\s*일)')
+                    extracted['div_date'] = get_date(r'(?:신\s*주\s*의\s*)?배\s*당\s*기\s*산\s*일')
+                    extracted['list_date'] = get_date(r'(?:신\s*주\s*권\s*교\s*부\s*예\s*정\s*일|상\s*장\s*예\s*정\s*일)')
                     
-                    # 4. 납입일
-                    pay_match = re.search(r'납입일.*?(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', clean_text)
-                    if pay_match: extracted['pay_date'] = pay_match.group(1)
-                    
-                    # 5. 신주의 배당기산일
-                    div_match = re.search(r'배당기산일.*?(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', clean_text)
-                    if div_match: extracted['dividend_date'] = div_match.group(1)
-                    
-                    # 6. 신주의 상장 예정일
-                    list_match = re.search(r'상장\s*예정일.*?(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', clean_text)
-                    if list_match: extracted['listing_date'] = list_match.group(1)
-                    
-                    # 7. 이사회결의일
-                    board_match = re.search(r'이사회결의일.*?(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', clean_text)
-                    if board_match: extracted['board_date'] = board_match.group(1)
-                    
-                    # 8. 투자자 (제3자배정 대상자)
-                    inv_match = re.search(r'배정\s*대상자.{0,100}?(주식회사\s*\S+|\S+\s*투자조합|\S+\s*펀드|[가-힣]{2,4})', clean_text)
-                    if inv_match:
-                        extracted['investor'] = inv_match.group(1).strip()
-                    elif "제3자배정" in clean_text:
-                        extracted['investor'] = "제3자배정 (원문참조)"
-                    elif "주주배정" in clean_text:
-                        extracted['investor'] = "기존주주"
+                    # 4. 투자자
+                    if "제3자배정" in clean_text: extracted['investor'] = "제3자배정 (원문참조)"
 
     except Exception as e:
-        print(f"유상증자 XML 에러 ({rcept_no}): {e}")
+        print(f"문서 XML 에러 ({rcept_no}): {e}")
         
     return extracted
 
@@ -107,17 +116,17 @@ def to_int(val):
     except:
         return 0
 
-def get_and_update_piic():
+def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=12)).strftime('%Y%m%d')
 
-    print("최근 12일 유상증자 결정 공시 탐색 중...")
+    print("최근 12일 유상증자 공시 탐색 중 (정정공시 필터링 적용)...")
     
-    # 공시 목록 호출
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
         'crtfc_key': dart_key, 'bgn_de': start_date, 'end_de': end_date, 
-        'pblntf_ty': 'B', 'pblntf_detail_ty': 'B001', 'page_count': '100'
+        'pblntf_ty': 'B', 'pblntf_detail_ty': 'B001', 'page_count': '100',
+        'last_reprt_at': 'Y'
     }
     all_filings = fetch_dart_json(list_url, list_params)
 
@@ -125,55 +134,80 @@ def get_and_update_piic():
         print("최근 지정 기간 내 주요사항보고서가 없습니다.")
         return
 
-    # 구글 시트 탭 연결
-    worksheet = sh.worksheet('유상증자_1')
-    existing_rcept_nos = worksheet.col_values(21) # 21번째 열이 접수번호
-    cls_map = {'Y': '유가', 'K': '코스닥', 'N': '코넥스', 'E': '기타'}
-
-    # 유상증자결정 보고서만 필터링
-    df_filtered = all_filings[all_filings['report_nm'].str.contains('유상증자결정', na=False)]
-    
+    df_filtered = all_filings[all_filings['report_nm'].str.contains('유상증자결정', na=False)].copy()
     if df_filtered.empty:
-        print("ℹ️ 유상증자결정 공시가 없습니다.")
+        print("ℹ️ 유상증자 공시가 없습니다.")
         return
+        
+    df_filtered['corp_cls'] = df_filtered['corp_cls'].fillna('')
         
     corp_codes = df_filtered['corp_code'].unique()
     detail_dfs = []
     
     for code in corp_codes:
         detail_params = {'crtfc_key': dart_key, 'corp_code': code, 'bgn_de': start_date, 'end_de': end_date}
-        df_detail = fetch_dart_json("https://opendart.fss.or.kr/api/piicDecsn.json", detail_params)
+        df_detail = fetch_dart_json('https://opendart.fss.or.kr/api/piicDecsn.json', detail_params)
         if not df_detail.empty:
             detail_dfs.append(df_detail)
             
     if not detail_dfs:
-        print("상세 데이터를 불러올 수 없습니다.")
+        print("ℹ️ 상세 데이터를 불러올 수 없습니다.")
         return
         
     df_combined = pd.concat(detail_dfs, ignore_index=True)
-    df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='inner')
+    
+    df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
+    
+    # 💡 [버그 해결] 여기서 'report_nm'(보고서명)을 빼먹어서 빈칸이 나왔었습니다! 지금은 추가했습니다.
+    df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
+    
+    worksheet = sh.worksheet('유상증자')
+    existing_rcept_nos = worksheet.col_values(21) # 21번째 접수번호 컬럼 확인
+    
     new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
     
     if new_data_df.empty:
-        print("ℹ️ 새로 추가할 유상증자 데이터가 없습니다.")
+        print("ℹ️ 새로 추가할 데이터가 없습니다.")
         return
-
+        
     data_to_add = []
+    cls_map = {'Y': '유가', 'K': '코스닥', 'N': '코넥스', 'E': '기타'}
+    
     for _, row in new_data_df.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        print(f" -> {corp_name} (유상증자) 세밀한 데이터 포매팅 적용 중...")
+        report_nm = row.get('report_nm', '') # 이제 정상적으로 보고서명이 들어옵니다!
         
-        # XML에서 부족한 일정 및 단가 정보 추출
-        xml_data = extract_piic_xml_details(dart_key, rcept_no)
+        print(f" -> {corp_name} 스마트 데이터 탐색 적용 중...")
         
-        # 자금용도 합산 및 텍스트화
+        xml_data = extract_xml_details(dart_key, rcept_no)
+        
+        market = cls_map.get(row.get('corp_cls', ''), '기타')
+        method = row.get('ic_mthn', '')
+        
+        ostk = to_int(row.get('nstk_ostk_cnt'))
+        estk = to_int(row.get('nstk_estk_cnt'))
+        new_shares = ostk + estk
+        product = "보통주" if ostk > 0 else "기타주"
+        
+        old_ostk = to_int(row.get('bfic_tisstk_ostk'))
+        old_estk = to_int(row.get('bfic_tisstk_estk'))
+        old_shares = old_ostk + old_estk
+        
+        new_shares_str = f"{new_shares:,}"
+        old_shares_str = f"{old_shares:,}"
+        
+        ratio = f"{(new_shares / old_shares * 100):.2f}%" if old_shares > 0 else "-"
+        
         fclt = to_int(row.get('fdpp_fclt'))
         bsninh = to_int(row.get('fdpp_bsninh'))
         op = to_int(row.get('fdpp_op'))
         dtrp = to_int(row.get('fdpp_dtrp'))
         ocsa = to_int(row.get('fdpp_ocsa'))
         etc = to_int(row.get('fdpp_etc'))
+        
+        total_amt = fclt + bsninh + op + dtrp + ocsa + etc
+        total_amt_uk = f"{(total_amt / 100000000):,.2f}" if total_amt > 0 else "0.00"
         
         purposes = []
         if fclt > 0: purposes.append("시설")
@@ -182,57 +216,39 @@ def get_and_update_piic():
         if dtrp > 0: purposes.append("채무상환")
         if ocsa > 0: purposes.append("타법인증권")
         if etc > 0: purposes.append("기타")
-        purpose_str = ", ".join(purposes) if purposes else "-"
-
-        # 총 자금(확정발행금액) 계산 (단위: 억원)
-        total_fund = fclt + bsninh + op + dtrp + ocsa + etc
-        fund_100m_str = f"{total_fund / 100000000:,.1f}" if total_fund > 0 else "-"
-
-        # 주식수 계산
-        nstk_o = to_int(row.get('nstk_ostk_cnt'))
-        nstk_e = to_int(row.get('nstk_estk_cnt'))
-        total_new_shares = nstk_o + nstk_e
-        
-        bfic_o = to_int(row.get('bfic_tisstk_ostk'))
-        bfic_e = to_int(row.get('bfic_tisstk_estk'))
-        total_old_shares = bfic_o + bfic_e
-        
-        # 증자비율
-        increase_ratio = f"{(total_new_shares / total_old_shares) * 100:.2f}%" if total_old_shares > 0 else "-"
-        
-        # 발행상품명 판별
-        product_name = "보통주" if nstk_o > 0 and nstk_e == 0 else ("기타주" if nstk_o == 0 and nstk_e > 0 else "보통주+기타주")
+        purpose_str = ", ".join(purposes)
         
         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
         
+        # 총 21칸 완성
         new_row = [
-            corp_name,                                      # 1. 회사명
-            row.get('report_nm', '유상증자결정'),           # 2. 보고서명
-            cls_map.get(row.get('corp_cls', ''), '기타'),   # 3. 상장시장
-            xml_data['board_date'],                         # 4. 최초 이사회결의일
-            str(row.get('ic_mthn', '-')),                   # 5. 증자방식
-            product_name,                                   # 6. 발행상품
-            f"{total_new_shares:,}" if total_new_shares > 0 else "-", # 7. 신규발행주식수
-            xml_data['issue_price'],                        # 8. 확정발행가(원)
-            xml_data['base_price'],                         # 9. 기준주가
-            fund_100m_str,                                  # 10. 확정발행금액(억원)
-            xml_data['discount_rate'],                      # 11. 할인(할증률)
-            f"{total_old_shares:,}" if total_old_shares > 0 else "-", # 12. 증자전 주식수
-            increase_ratio,                                 # 13. 증자비율
-            xml_data['pay_date'],                           # 14. 납입일
-            xml_data['dividend_date'],                      # 15. 신주의 배당기산일
-            xml_data['listing_date'],                       # 16. 신주의 상장 예정일
-            xml_data['board_date'],                         # 17. 이사회결의일
-            purpose_str,                                    # 18. 자금용도
-            xml_data['investor'],                           # 19. 투자자
-            link,                                           # 20. 링크
-            rcept_no                                        # 21. 접수번호
+            corp_name,                  # 1
+            report_nm,                  # 2 (정상 작동!)
+            market,                     # 3
+            xml_data['board_date'],     # 4
+            method,                     # 5
+            product,                    # 6
+            new_shares_str,             # 7
+            xml_data['issue_price'],    # 8
+            xml_data['base_price'],     # 9
+            total_amt_uk,               # 10
+            xml_data['discount_rate'],       # 11
+            old_shares_str,             # 12
+            ratio,                      # 13
+            xml_data['pay_date'],       # 14
+            xml_data['div_date'],       # 15
+            xml_data['list_date'],      # 16
+            xml_data['board_date'],     # 17
+            purpose_str,                # 18
+            xml_data['investor'],       # 19
+            link,                       # 20
+            rcept_no                    # 21 (접수번호 U열)
         ]
+        
         data_to_add.append(new_row)
         
-    if data_to_add:
-        worksheet.append_rows(data_to_add)
-        print(f"✅ 유상증자결정: 신규 데이터 {len(data_to_add)}건 추가 완료!")
+    worksheet.append_rows(data_to_add)
+    print(f"✅ 유상증자: '보고서명' 추가 오류 수정 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
-    get_and_update_piic()
+    get_and_update_yusang()

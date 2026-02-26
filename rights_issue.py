@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱] ---
+# --- [XML 원문 족집게 파싱 (정확도 극대화)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -68,20 +68,40 @@ def extract_xml_details(api_key, rcept_no):
                         return '-'
                         
                     extracted['issue_price'] = get_price(r'(?:확\s*정|예\s*정)?\s*발\s*행\s*가\s*(?:액)?')
-                    extracted['base_price'] = get_price(r'기\s*준\s*주\s*가')
+                    # '기준발행가액', '기준가액' 등 변칙적인 표현 모두 포함
+                    extracted['base_price'] = get_price(r'기\s*준\s*주\s*가|기\s*준\s*발\s*행\s*가\s*액|기\s*준\s*가\s*액')
                     
-                    # 2. 할인/할증률
+                    # 2. 할인/할증률 (정확도 대폭 강화)
                     def get_discount():
-                        for match in re.finditer(r'(할\s*인\s*율|할\s*증\s*율|할\s*인\s*\(\s*할\s*증\s*\)\s*율)', clean_text):
+                        # 할인율, 할증률, 할인(할증)율, 할인율(할증율) 등 모든 패턴
+                        pattern = r'(할\s*인\s*[률율]|할\s*증\s*[률율]|할\s*인\s*[\(\[]?\s*할\s*증\s*[\)\]]?\s*[률율])'
+                        for match in re.finditer(pattern, clean_text):
                             keyword = match.group(1).replace(' ', '')
                             window = clean_text[match.end():match.end()+100]
+                            
+                            # 1순위: % 기호가 있는 숫자
                             m = re.search(r'([\-\+]?\s*[0-9]+\.?[0-9]*)\s*%', window)
+                            
+                            # 2순위: % 기호가 빠진 채 소수점 숫자만 적힌 경우 (예: 10.0)
+                            if not m:
+                                m2 = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+)', window)
+                                if m2 and float(m2.group(1).replace(' ', '')) < 100:
+                                    m = m2
+                                    
                             if m:
                                 val = float(m.group(1).replace(' ', ''))
-                                if '할인율' in keyword and val > 0: val = -val
-                                elif '할증율' in keyword and val < 0: val = -val
-                                elif keyword == '할인(할증)율' and val > 0 and '+' not in m.group(1): val = -val
+                                if val == 0:
+                                    return "0.00%"
+                                if '할인' in keyword and '할증' not in keyword and val > 0: val = -val
+                                elif '할증' in keyword and '할인' not in keyword and val < 0: val = -val
+                                elif '할인' in keyword and '할증' in keyword and val > 0 and '+' not in m.group(1): val = -val
                                 return f"{val:+.2f}%"
+                                
+                            # 3순위: 표에 "해당없음" 등으로 적혀 있어 할인이 아예 없는 경우
+                            if re.search(r'(해당\s*사항\s*없음|해당\s*없음|-)', window[:20]):
+                                if not re.search(r'[0-9]', window[:20]):
+                                    return "0.00%"
+                                    
                         return '-'
                     extracted['discount'] = get_discount()
                     
@@ -158,7 +178,6 @@ def get_and_update_yusang():
     
     df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
     
-    # 💡 [버그 해결] 여기서 'report_nm'(보고서명)을 빼먹어서 빈칸이 나왔었습니다! 지금은 추가했습니다.
     df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
     
     worksheet = sh.worksheet('유상증자')
@@ -176,7 +195,7 @@ def get_and_update_yusang():
     for _, row in new_data_df.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        report_nm = row.get('report_nm', '') # 이제 정상적으로 보고서명이 들어옵니다!
+        report_nm = row.get('report_nm', '') 
         
         print(f" -> {corp_name} 스마트 데이터 탐색 적용 중...")
         
@@ -223,16 +242,16 @@ def get_and_update_yusang():
         # 총 21칸 완성
         new_row = [
             corp_name,                  # 1
-            report_nm,                  # 2 (정상 작동!)
+            report_nm,                  # 2 
             market,                     # 3
             xml_data['board_date'],     # 4
             method,                     # 5
             product,                    # 6
             new_shares_str,             # 7
-            xml_data['issue_price'],    # 8
-            xml_data['base_price'],     # 9
+            xml_data.get('issue_price', '-'),    # 8
+            xml_data.get('base_price', '-'),     # 9
             total_amt_uk,               # 10
-            xml_data['discount_rate'],       # 11
+            xml_data.get('discount', '-'),       # 11 (오류 방지 위해 get 함수로 통일)
             old_shares_str,             # 12
             ratio,                      # 13
             xml_data['pay_date'],       # 14
@@ -248,7 +267,7 @@ def get_and_update_yusang():
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: '보고서명' 추가 오류 수정 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
+    print(f"✅ 유상증자: '기준주가', '할인율' 추출 정확도 개선 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

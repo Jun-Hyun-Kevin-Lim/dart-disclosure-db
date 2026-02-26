@@ -31,15 +31,14 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [채권 전용 XML 원문 족집게 파싱 (정확도 극대화 & X 처리)] ---
+# --- [채권 전용 XML 원문 족집게 파싱 ('해당사항 없음' 완벽 처리)] ---
 def extract_bond_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
     
-    # 💡 기본값을 모두 'X'로 설정
     extracted = {
-        'put_option': 'X', 'call_option': 'X', 
-        'call_ratio': 'X', 'ytc': 'X', 'investor': '원문참조'
+        'put_option': '없음', 'call_option': '없음', 
+        'call_ratio': '-', 'ytc': '-', 'investor': '원문참조'
     }
     
     try:
@@ -57,61 +56,56 @@ def extract_bond_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 💡 핵심: 목차를 피하기 위해 문서의 "가장 마지막" 위치를 타겟팅하는 스마트 함수
-                    def get_option_text(text, keyword_regex, stop_regex, max_chars=500):
-                        matches = list(re.finditer(keyword_regex, text, re.IGNORECASE))
-                        if not matches:
-                            return "X"
-                            
-                        # 문서 후반부에 나오는 진짜 세부 설명 부분을 가져오기 위해 마지막 매치 지점 사용
-                        last_match = matches[-1]
-                        start_idx = last_match.end()
+                    # 💡 특정 항목의 시작점부터 다음 항목 제목 직전까지만 잘라내는 함수
+                    def get_section_text(text, start_regex, stop_regex, max_chars=1000):
+                        start_match = re.search(start_regex, text)
+                        if not start_match:
+                            return "없음"
                         
-                        window_text = text[start_idx : start_idx + max_chars]
+                        start_idx = start_match.start()
+                        after_text = text[start_match.end():]
+                        stop_match = re.search(stop_regex, after_text)
                         
-                        # 다음 주요 항목이 나오면 그 직전까지만 잘라냄
-                        stop_match = re.search(stop_regex, window_text, re.IGNORECASE)
                         if stop_match:
-                            content = window_text[:stop_match.start()]
+                            content = text[start_idx : start_match.end() + stop_match.start()]
+                            # 키워드(제목) 이후의 실제 내용만 분리
+                            actual_content = after_text[:stop_match.start()].strip()
                         else:
-                            content = window_text
+                            content = text[start_idx : start_idx + max_chars]
+                            actual_content = after_text[:max_chars].strip()
                             
-                        # "에 관한 사항", "-", ":" 등 불필요한 서론 기호 제거
+                        # 💡 [핵심 수정] 내용이 비어있거나 '해당사항 없음'인 경우 무조건 "없음" 반환
+                        clean_actual = re.sub(r'[\s\-\.]', '', actual_content)
+                        if not clean_actual or clean_actual in ['해당사항없음', '해당없음', '없음']:
+                            return "없음"
+
                         content = content.strip()
-                        content = re.sub(r'^(?:\s*에\s*관한\s*사항\s*)?[\:\-\|\>\s]*', '', content)
+                        content = re.sub(r'[\,\-\.\s]+$', '', content)
                         
-                        # 💡 "해당사항 없음" 완벽 필터링 (공백, 괄호 등 기호 다 떼고 순수 글자만 검사)
-                        clean_check = re.sub(r'[\s\-\.\:\(\)]', '', content)
-                        if not clean_check or clean_check in ['해당사항없음', '해당없음', '없음', '해당사항없음입니다', 'X']:
-                            return "X"
-                            
-                        # 내용이 길면 400자 언저리에서 요약
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                            
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + "..."
                         return content
 
-                    # 1. Put Option (조기상환청구권) 추출
-                    put_stop = r'(매도\s*청구권|Call\s*Option|기타\s*투자판단|당해\s*사채|합병\s*관련|발행회사)'
-                    extracted['put_option'] = get_option_text(clean_text, r'(조기상환\s*청구권|Put\s*Option)', put_stop)
+                    # 💡 1. Put Option (조기상환청구권) 추출
+                    put_stop_regex = r'(매도\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
+                    extracted['put_option'] = get_section_text(clean_text, r'조기상환\s*청구권', put_stop_regex)
                     
-                    # 2. Call Option (매도청구권) 추출
-                    call_stop = r'(조기상환\s*청구권|Put\s*Option|기타\s*투자판단|당해\s*사채|합병\s*관련|발행회사)'
-                    extracted['call_option'] = get_option_text(clean_text, r'(매도\s*청구권|Call\s*Option)', call_stop)
+                    # 💡 2. Call Option (매도청구권) 추출
+                    call_stop_regex = r'(조기상환\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
+                    extracted['call_option'] = get_section_text(clean_text, r'매도\s*청구권', call_stop_regex)
                     
-                    # 3. Call 비율 추출 (콜옵션이 있을 때만 계산)
-                    if extracted['call_option'] != 'X':
+                    # Call 비율 추출 (콜옵션이 '없음'이 아닐 때만 계산)
+                    if extracted['call_option'] != '없음':
                         ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', extracted['call_option'])
                         if ratio_match:
                             extracted['call_ratio'] = ratio_match.group(1) + '%'
                             
-                    # 4. YTC (매도청구권 수익률)
-                    if extracted['call_option'] != 'X':
-                        ytc_match = re.search(r'매도청구권.*?수익률.{0,50}?([0-9]{1,2}(?:\.[0-9]+)?)\s*%', clean_text)
-                        if ytc_match:
-                            extracted['ytc'] = ytc_match.group(1) + '%'
-                            
-                    # 5. 투자자 (대상자) 추출 시도
+                    # 3. YTC (매도청구권 수익률)
+                    ytc_match = re.search(r'매도청구권.*?수익률.{0,50}?([0-9]{1,2}(?:\.[0-9]+)?)\s*%', clean_text)
+                    if ytc_match:
+                        extracted['ytc'] = ytc_match.group(1) + '%'
+                        
+                    # 4. 투자자 (대상자) 추출 시도
                     inv_match = re.search(r'배정\s*대상자.{0,100}?(주식회사\s*\S+|\S+\s*투자조합|\S+\s*펀드|[가-힣]{2,4})', clean_text)
                     if inv_match:
                         extracted['investor'] = inv_match.group(1).strip()
@@ -260,10 +254,10 @@ def get_and_update_bonds():
                 str(row.get('bd_mtd', '-')),                # 8. 만기
                 str(row.get(f_map['start'], '-')),          # 9. 전환청구 시작
                 str(row.get(f_map['end'], '-')),            # 10. 전환청구 종료
-                xml_data['put_option'],                     # 11. Put Option (없으면 X, 정확도 극강)
-                xml_data['call_option'],                    # 12. Call Option (없으면 X, 정확도 극강)
-                xml_data['call_ratio'],                     # 13. Call 비율 (없으면 X)
-                xml_data['ytc'],                            # 14. YTC (없으면 X)
+                xml_data['put_option'],                     # 11. Put Option ("해당없음" 완벽 처리)
+                xml_data['call_option'],                    # 12. Call Option ("해당없음" 완벽 처리)
+                xml_data['call_ratio'],                     # 13. Call 비율
+                xml_data['ytc'],                            # 14. YTC
                 str(row.get('bdis_mthn', '-')),             # 15. 모집방식
                 product_name,                               # 16. 발행상품
                 price_str,                                  # 17. 행사(전환)가액(원)

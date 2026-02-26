@@ -9,20 +9,17 @@ import re
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
-# ==========================================
-# 1. 초기 셋팅: API 키와 구글 시트 연결
-# ==========================================
+# 1. GitHub Secrets 설정값
 dart_key = os.environ['DART_API_KEY']
 service_account_str = os.environ['GOOGLE_CREDENTIALS_JSON']
 sheet_id = os.environ['GOOGLE_SHEET_ID']
 
+# 2. 구글 시트 인증
 creds = json.loads(service_account_str)
 gc = gspread.service_account_from_dict(creds)
 sh = gc.open_by_key(sheet_id)
 
-# ==========================================
-# 2. DART API 기본 데이터 가져오기 (JSON)
-# ==========================================
+# --- [JSON 파싱] ---
 def fetch_dart_json(url, params):
     try:
         res = requests.get(url, params=params)
@@ -34,14 +31,11 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# ==========================================
-# 3. 💡 완벽 스캐너: 표(Table) 구조 분석 엔진
-# ==========================================
+# --- [XML 원문 족집게 파싱 (정규식 초정밀 업그레이드)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
     
-    # 실패 시 기본값 (빈칸)
     extracted = {
         'board_date': '-', 'issue_price': '-', 'base_price': '-', 'discount': '-',
         'pay_date': '-', 'div_date': '-', 'list_date': '-', 'investor': '원문참조'
@@ -55,120 +49,42 @@ def extract_xml_details(api_key, rcept_no):
                 with z.open(xml_filename) as f:
                     xml_content = f.read().decode('utf-8')
                     soup = BeautifulSoup(xml_content, 'html.parser')
+                    raw_text = soup.get_text(separator=' ', strip=True)
                     
-                    raw_data = {}
+                    # 1. 확정발행가 추출 (글자 사이 잡문자 무시하고 첫 숫자 매칭)
+                    issue = re.search(r'발행가액[^\d]*([0-9]{1,3}(?:,[0-9]{3})*)', raw_text)
+                    if issue: extracted['issue_price'] = issue.group(1).strip()
                     
-                    # 💡 표의 '행(tr)' 단위로만 쪼개서 읽음 -> 다른 줄의 데이터를 훔쳐오는 오류 원천 차단
-                    for tr in soup.find_all('tr'):
-                        cells = tr.find_all(['th', 'td'])
-                        
-                        for i in range(len(cells)):
-                            header_raw = cells[i].get_text(strip=True)
-                            header_clean = re.sub(r'\s+', '', header_raw.replace('\xa0', ''))
-                            
-                            # 현재 칸이 제목이면, 무조건 '같은 줄 오른쪽 칸'의 데이터만 긁어옴
-                            if i + 1 < len(cells):
-                                val_raw = " ".join([c.get_text(separator=' ', strip=True) for c in cells[i+1:]])
-                                
-                                if 'issue_price' not in raw_data and re.search(r'(1주당|확정|예정|모집|발행|신주).*발행가액', header_clean):
-                                    raw_data['issue_price'] = val_raw
-                                elif 'base_price' not in raw_data and re.search(r'^기준(주가|발행가액|가액|단가|주당가액)', header_clean):
-                                    raw_data['base_price'] = val_raw
-                                elif 'discount' not in raw_data and re.search(r'(할인|할증)[율률]', header_clean):
-                                    raw_data['discount'] = val_raw
-                                    raw_data['discount_header'] = header_clean
-                                elif 'board_date' not in raw_data and re.search(r'(최초)?이사회결의일', header_clean):
-                                    raw_data['board_date'] = val_raw
-                                elif 'pay_date' not in raw_data and re.search(r'(납입일|주금납입기일)', header_clean):
-                                    raw_data['pay_date'] = val_raw
-                                elif 'div_date' not in raw_data and re.search(r'(신주의)?배당기산일', header_clean):
-                                    raw_data['div_date'] = val_raw
-                                elif 'list_date' not in raw_data and re.search(r'(신주권교부예정일|신주의상장예정일|상장예정일|신주상장예정일)', header_clean):
-                                    raw_data['list_date'] = val_raw
-
-                    # --- [클리닝 1] 가격 팩트 체크 ---
-                    def clean_price(text):
-                        if not text: return '-'
-                        t_clean = re.sub(r'[\s,원]', '', text)
-                        if re.search(r'^(미정|해당없음|기재생략|-)', t_clean): return '-'
-                        
-                        nums = re.findall(r'(?<!\d)([1-9]\d{2,})(?!\d)', t_clean)
-                        for val_str in nums:
-                            val = int(val_str)
-                            if val not in [2023, 2024, 2025, 2026, 2027]:
-                                return f"{val:,}"
-                        return '-'
-                        
-                    # --- [클리닝 2] 날짜 팩트 체크 ---
-                    def clean_date(text):
-                        if not text: return '-'
-                        t_clean = re.sub(r'\s+', '', text)
-                        if re.search(r'^(미정|해당없음|기재생략|-)', t_clean): return '-'
-                        
-                        m = re.search(r'(20[2-3]\d)[\-\.년/]([0-1]?\d)[\-\.월/]([0-3]?\d)', t_clean)
-                        if m:
-                            y, m_num, d_num = m.groups()
-                            return f"{y}년 {m_num.zfill(2)}월 {d_num.zfill(2)}일"
-                        return '-'
-                        
-                    # --- [클리닝 3] 할인율/할증률 완벽 검증 ---
-                    def clean_discount(text, issue_p, base_p, header_text):
-                        if not text: return '-'
-                        t_clean = re.sub(r'\s+', '', text)
-                        if re.search(r'^(미정|해당사항없음|해당없음|기재생략|-)', t_clean): return "0.00%"
-                        
-                        # 수학적 부호 판별
-                        math_sign = 0
-                        if issue_p != '-' and base_p != '-':
-                            try:
-                                i_v = float(issue_p.replace(',', ''))
-                                b_v = float(base_p.replace(',', ''))
-                                if b_v > 0:
-                                    if i_v > b_v: math_sign = 1    # 할증(+)
-                                    elif i_v < b_v: math_sign = -1 # 할인(-)
-                            except: pass
-                            
-                        # 숫자 추출
-                        m = re.search(r'([+\-]?\d+(?:\.\d+)?)', t_clean)
-                        if m:
-                            val_str = m.group(1)
-                            try: val = float(val_str)
-                            except: return '-'
-                            
-                            if val == 0: return "0.00%"
-                            if abs(val) > 100: return '-' # 페이지 번호 쓰레기값 방어
-                            
-                            val_abs = abs(val)
-                            
-                            # 1. 수학적 팩트가 있으면 무조건 우선
-                            if math_sign != 0:
-                                return f"{val_abs * math_sign:+.2f}%"
-                            # 2. 계산 불가 시 텍스트 기호 및 문맥 파악
-                            else:
-                                if '-' in val_str: return f"{-val_abs:+.2f}%"
-                                elif '+' in val_str: return f"{val_abs:+.2f}%"
-                                else:
-                                    if '할증' in header_text and '할인' not in header_text: return f"+{val_abs:.2f}%"
-                                    else: return f"{-val_abs:+.2f}%"
-                        return '-'
-
-                    # 클리닝 기계 가동 및 결과 저장
-                    extracted['issue_price'] = clean_price(raw_data.get('issue_price'))
-                    extracted['base_price'] = clean_price(raw_data.get('base_price'))
-                    extracted['discount'] = clean_discount(raw_data.get('discount'), extracted['issue_price'], extracted['base_price'], raw_data.get('discount_header', ''))
-                    extracted['board_date'] = clean_date(raw_data.get('board_date'))
-                    extracted['pay_date'] = clean_date(raw_data.get('pay_date'))
-                    extracted['div_date'] = clean_date(raw_data.get('div_date'))
-                    extracted['list_date'] = clean_date(raw_data.get('list_date'))
+                    # 2. 기준주가 추출
+                    base = re.search(r'기준주가[^\d]*([0-9]{1,3}(?:,[0-9]{3})*)', raw_text)
+                    if base: extracted['base_price'] = base.group(1).strip()
                     
-                    full_text = soup.get_text(separator=' ', strip=True).replace(' ', '')
-                    if "제3자배정" in full_text: extracted['investor'] = "제3자배정 (원문참조)"
+                    # 3. 할인/할증률 추출 (마이너스 기호가 살도록 정규식 핀셋 수정 완료!)
+                    disc = re.search(r'할\s*[인증]\s*율[^\d\+\-]*([\-\+]?[0-9\.]+)', raw_text)
+                    if disc: extracted['discount'] = disc.group(1).strip() + "%"
+                    
+                    # 4. 날짜 추출 (이사회, 납입일, 배당기산일, 상장예정일)
+                    board = re.search(r'이사회결의일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
+                    if board: extracted['board_date'] = board.group(1).strip()
+                    
+                    pay = re.search(r'납\s*입\s*일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
+                    if pay: extracted['pay_date'] = pay.group(1).strip()
+                    
+                    div = re.search(r'배당기산일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
+                    if div: extracted['div_date'] = div.group(1).strip()
+                    
+                    list_d = re.search(r'상장\s*예정일[^\d]*(\d{4}[\-\.년\s]+\d{1,2}[\-\.월\s]+\d{1,2})', raw_text)
+                    if list_d: extracted['list_date'] = list_d.group(1).strip()
+                    
+                    # 5. 투자자
+                    if "제3자배정" in raw_text: extracted['investor'] = "제3자배정 (원문참조)"
 
     except Exception as e:
         print(f"문서 XML 에러 ({rcept_no}): {e}")
         
     return extracted
 
+# 안전한 숫자 변환 함수
 def to_int(val):
     try:
         if pd.isna(val) or str(val).strip() == '': return 0
@@ -176,33 +92,27 @@ def to_int(val):
     except:
         return 0
 
-# ==========================================
-# 4. 메인 실행 및 덮어쓰기 로직
-# ==========================================
 def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
-    start_date = (datetime.now() - timedelta(days=12)).strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=7)).strftime('%Y%m%d')
 
-    print("🚀 100% 완벽 스캐너 가동! 데이터 검증 및 덮어쓰기 진행 중...")
+    print("최근 7일 유상증자 공시 탐색 중...")
     
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
         'crtfc_key': dart_key, 'bgn_de': start_date, 'end_de': end_date, 
-        'pblntf_ty': 'B', 'pblntf_detail_ty': 'B001', 'page_count': '100',
-        'last_reprt_at': 'Y'
+        'pblntf_ty': 'B', 'pblntf_detail_ty': 'B001', 'page_count': '100'
     }
     all_filings = fetch_dart_json(list_url, list_params)
 
     if all_filings.empty:
-        print("최근 지정 기간 내 주요사항보고서가 없습니다.")
+        print("최근 7일간 주요사항보고서가 없습니다.")
         return
 
-    df_filtered = all_filings[all_filings['report_nm'].str.contains('유상증자결정', na=False)].copy()
+    df_filtered = all_filings[all_filings['report_nm'].str.contains('유상증자결정', na=False)]
     if df_filtered.empty:
         print("ℹ️ 유상증자 공시가 없습니다.")
         return
-        
-    df_filtered['corp_cls'] = df_filtered['corp_cls'].fillna('')
         
     corp_codes = df_filtered['corp_code'].unique()
     detail_dfs = []
@@ -218,26 +128,33 @@ def get_and_update_yusang():
         return
         
     df_combined = pd.concat(detail_dfs, ignore_index=True)
-    df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
     
-    df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
+    # 상장시장(corp_cls) 이름 충돌 방지를 위해 목록에서는 rcept_no만 가져와 병합
+    df_merged = pd.merge(df_combined, df_filtered[['rcept_no']], on='rcept_no', how='inner')
     
     worksheet = sh.worksheet('유상증자')
-    existing_rcept_nos = worksheet.col_values(21) 
+    existing_rcept_nos = worksheet.col_values(20) 
+    new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
     
+    if new_data_df.empty:
+        print("ℹ️ 새로 추가할 데이터가 없습니다.")
+        return
+        
     data_to_add = []
     cls_map = {'Y': '유가', 'K': '코스닥', 'N': '코넥스', 'E': '기타'}
     
-    for _, row in df_merged.iterrows():
+    for _, row in new_data_df.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
-        report_nm = row.get('report_nm', '') 
+        print(f" -> {corp_name} 세밀한 데이터 포매팅 적용 중...")
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
+        # 1. 상장시장 (에러 해결)
         market = cls_map.get(row.get('corp_cls', ''), '기타')
         method = row.get('ic_mthn', '')
         
+        # 2. 주식수 & 천 단위 콤마
         ostk = to_int(row.get('nstk_ostk_cnt'))
         estk = to_int(row.get('nstk_estk_cnt'))
         new_shares = ostk + estk
@@ -247,11 +164,13 @@ def get_and_update_yusang():
         old_estk = to_int(row.get('bfic_tisstk_estk'))
         old_shares = old_ostk + old_estk
         
-        new_shares_str = f"{new_shares:,}"
-        old_shares_str = f"{old_shares:,}"
+        new_shares_str = f"{new_shares:,}"  # 쉼표 추가
+        old_shares_str = f"{old_shares:,}"  # 쉼표 추가
         
+        # 3. 증자비율 (%)
         ratio = f"{(new_shares / old_shares * 100):.2f}%" if old_shares > 0 else "-"
         
+        # 4. 확정발행금액 (억원 단위, 소수점 2자리 세밀하게)
         fclt = to_int(row.get('fdpp_fclt'))
         bsninh = to_int(row.get('fdpp_bsninh'))
         op = to_int(row.get('fdpp_op'))
@@ -262,6 +181,7 @@ def get_and_update_yusang():
         total_amt = fclt + bsninh + op + dtrp + ocsa + etc
         total_amt_uk = f"{(total_amt / 100000000):,.2f}" if total_amt > 0 else "0.00"
         
+        # 자금용도 추출
         purposes = []
         if fclt > 0: purposes.append("시설")
         if bsninh > 0: purposes.append("영업양수")
@@ -274,47 +194,32 @@ def get_and_update_yusang():
         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
         
         new_row = [
-            corp_name,                           
-            report_nm,                           
-            market,                              
-            xml_data['board_date'],              
-            method,                              
-            product,                             
-            new_shares_str,                      
-            xml_data.get('issue_price', '-'),    
-            xml_data.get('base_price', '-'),     
-            total_amt_uk,                        
-            xml_data.get('discount', '-'),       
-            old_shares_str,                      
-            ratio,                               
-            xml_data['pay_date'],                
-            xml_data['div_date'],                
-            xml_data['list_date'],               
-            xml_data['board_date'],              
-            purpose_str,                         
-            xml_data['investor'],                
-            link,                                
-            rcept_no                             
+            corp_name,                  # 1
+            market,                     # 2 (복구됨)
+            xml_data['board_date'],     # 3
+            method,                     # 4
+            product,                    # 5
+            new_shares_str,             # 6 (쉼표 추가)
+            xml_data['issue_price'],    # 7 (업그레이드)
+            xml_data['base_price'],     # 8 (업그레이드)
+            total_amt_uk,               # 9 (소수점 추가)
+            xml_data['discount'],       # 10 (마이너스 부호 추가됨!)
+            old_shares_str,             # 11 (쉼표 추가)
+            ratio,                      # 12 (비율 복구)
+            xml_data['pay_date'],       # 13
+            xml_data['div_date'],       # 14
+            xml_data['list_date'],      # 15
+            xml_data['board_date'],     # 16
+            purpose_str,                # 17
+            xml_data['investor'],       # 18
+            link,                       # 19
+            rcept_no                    # 20
         ]
         
-        # 💡 에러 데이터 완벽 덮어쓰기 로직
-        if rcept_no in existing_rcept_nos:
-            row_idx = existing_rcept_nos.index(rcept_no) + 1 
-            try:
-                worksheet.update(range_name=f'A{row_idx}:U{row_idx}', values=[new_row])
-            except TypeError:
-                worksheet.update(f'A{row_idx}:U{row_idx}', [new_row])
-            print(f" 🔄 {corp_name}: 완벽 스캔 완료! 기존 데이터 빈틈없이 덮어썼습니다! (행: {row_idx})")
-            
-        else:
-            print(f" 🆕 {corp_name}: 신규 데이터 추출 완료!")
-            data_to_add.append(new_row)
+        data_to_add.append(new_row)
         
-    if data_to_add:
-        worksheet.append_rows(data_to_add)
-        print(f"✅ 끝! 신규 공시 {len(data_to_add)}건 완벽하게 추가 완료!")
-    else:
-        print("✅ 끝! 오류 났던 기존 데이터들 100% 깔끔하게 복구 완료했습니다!")
+    worksheet.append_rows(data_to_add)
+    print(f"✅ 유상증자: 디테일이 살아있는 신규 데이터 {len(data_to_add)}건 추가 완료!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

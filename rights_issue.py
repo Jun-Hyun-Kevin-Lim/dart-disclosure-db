@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (탐색 윈도우 500자 확장 & 초정밀 스캐너)] ---
+# --- [XML 원문 족집게 파싱 (가격/날짜 무적 스캐너 + 할인율 팩트 스캐너 결합)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -54,75 +54,65 @@ def extract_xml_details(api_key, rcept_no):
                         tag.append(' ')
                         
                     raw_text = soup.get_text(separator=' ', strip=True)
-                    # 💡 보이지 않는 특수 공백까지 완벽 제거
-                    raw_text = raw_text.replace('\xa0', ' ').replace('&nbsp;', ' ')
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. 가격 추출 (윈도우 500자로 대폭 확장)
+                    # 할인율 전용: 띄어쓰기 완전 박살낸 텍스트
+                    text_no_space = re.sub(r'\s+', '', raw_text.replace('\xa0', '').replace('\u200b', ''))
+                    
+                    # 1. 💡 가격 추출 (500자 스캐너 및 쉼표 파괴 로직 복구 완료!)
                     def get_price(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+500]
-                            nums = re.findall(r'(?<![\d\.])(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d{2,})(?![\d\.])', window)
-                            for n in nums:
-                                val = int(n.replace(',', ''))
-                                if val >= 100 and val not in [2023, 2024, 2025, 2026, 2027]:
+                            win_clean = re.sub(r'[\s,]', '', window) # 쉼표/공백 완전 제거
+                            
+                            nums = re.findall(r'(?<!\d)([1-9]\d{2,})(?!\d)', win_clean)
+                            for val_str in nums:
+                                val = int(val_str)
+                                if val not in [2023, 2024, 2025, 2026, 2027]:
                                     return f"{val:,}"
                         return '-'
                         
-                    # 키워드 패턴 대폭 확대
                     extracted['issue_price'] = get_price(r'(?:1\s*주\s*당|확\s*정|예\s*정|모\s*집|발\s*행|신\s*주).{0,10}?발\s*행\s*가\s*(?:액)?')
-                    extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*액|가\s*액|단\s*가|주\s*당\s*가\s*액)')
+                    extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액|단\s*가|주\s*당\s*가\s*액)')
                     
-                    # 2. 할인/할증률
-                    def get_discount(issue_p, base_p):
-                        math_sign = 0
-                        if issue_p != '-' and base_p != '-':
-                            try:
-                                i_v = float(issue_p.replace(',', ''))
-                                b_v = float(base_p.replace(',', ''))
-                                if b_v > 0:
-                                    if i_v > b_v: math_sign = 1
-                                    elif i_v < b_v: math_sign = -1
-                            except:
-                                pass
-
-                        pattern = r'(할\s*인|할\s*증)[^\d]{0,40}?(?:율|률)'
+                    # 2. 💡 할인/할증률 (회원님 요청 반영: 봇의 짐작을 빼고 "원문 팩트" 그대로 추출!)
+                    def get_discount():
+                        # 기호(+,-)가 있든 없든 원문에 적힌 숫자만 정확히 뽑아냄
+                        pattern = r'(?:할인|할증)[율률](?:또는할증[율률]|또는할인[율률])?[^\d]{0,30}?([+\-]?\d+(?:\.\d+)?)'
+                        match = re.search(pattern, text_no_space)
                         
-                        for match in re.finditer(pattern, clean_text):
-                            window = clean_text[match.end():match.end()+300]
-                            # 퍼센트 기호 있거나 없는 소수점/정수 (100 이하) 추출
-                            m = re.search(r'([+\-]?\s*\d{1,2}(?:\.\d+)?)\s*(?:%|프로)?', window)
-                            
-                            if m:
-                                val_str = m.group(1).replace(' ', '')
-                                try:
-                                    val = float(val_str)
-                                except:
-                                    continue
-                                    
-                                if val == 0: return "0.00%"
-                                val_abs = abs(val)
+                        if match:
+                            val_str = match.group(1)
+                            try:
+                                val = float(val_str)
+                            except:
+                                return '-'
                                 
-                                if math_sign != 0:
-                                    return f"{val_abs * math_sign:+.2f}%"
-                                else:
-                                    if '-' in val_str: return f"{-val_abs:+.2f}%"
-                                    elif '+' in val_str: return f"{val_abs:+.2f}%"
-                                    elif '할증' in match.group(0) and '할인' not in match.group(0): return f"{val_abs:+.2f}%"
-                                    else: return f"{-val_abs:+.2f}%"
-                                    
-                        if re.search(r'(할\s*인|할\s*증)[^\d]{0,30}?(?:율|률)[^\d]{0,20}?(해당|없음|-)', clean_text):
+                            if val == 0: return "0.00%"
+                            if abs(val) > 100: return '-' # 페이지 번호 스킵
+                            
+                            # 보고서에 기호가 있으면 있는 대로, 없으면 없는 대로 정직하게 출력
+                            if '-' in val_str:
+                                return f"{val:.2f}%"
+                            elif '+' in val_str:
+                                return f"{val:+.2f}%"
+                            else:
+                                return f"{val:.2f}%" # (예: 2.80 이면 그냥 2.80% 로 팩트 출력)
+                                
+                        # '해당없음' 방어
+                        if re.search(r'(?:할인|할증)[율률].{0,20}?(?:해당|없음|-)', text_no_space):
                             return "0.00%"
                             
                         return '-'
                         
-                    extracted['discount'] = get_discount(extracted['issue_price'], extracted['base_price'])
+                    extracted['discount'] = get_discount()
                     
-                    # 3. 날짜 추출 (윈도우 500자 확장 및 슬래시(/) 지원)
+                    # 3. 💡 날짜 추출 (500자 스캐너 및 슬래시(/) 지원 로직 복구 완료!)
                     def get_date(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+500]
-                            m = re.search(r'(20[2-3][0-9])\s*[\-\.년/]\s*([0-1]?[0-9])\s*[\-\.월/]\s*([0-3]?[0-9])', window)
+                            win_clean = window.replace(' ', '')
+                            m = re.search(r'(20[2-3]\d)[\-\.년/]([0-1]?\d)[\-\.월/]([0-3]?\d)', win_clean)
                             if m:
                                 y, m_num, d_num = m.groups()
                                 return f"{y}년 {m_num.zfill(2)}월 {d_num.zfill(2)}일"
@@ -153,7 +143,7 @@ def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=12)).strftime('%Y%m%d')
 
-    print("최근 12일 유상증자 공시 탐색 중 (탐색 범위 500자 확장판)...")
+    print("최근 12일 유상증자 공시 탐색 중 (가격/날짜 복구 & 할인율 팩트 스캐너 작동)...")
     
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
@@ -262,7 +252,7 @@ def get_and_update_yusang():
             xml_data.get('issue_price', '-'),    # 8
             xml_data.get('base_price', '-'),     # 9
             total_amt_uk,                        # 10
-            xml_data.get('discount', '-'),       # 11 
+            xml_data.get('discount', '-'),       # 11 (* 수학 계산 폐기! 원본 팩트 스캔!)
             old_shares_str,                      # 12
             ratio,                               # 13
             xml_data['pay_date'],                # 14
@@ -278,7 +268,7 @@ def get_and_update_yusang():
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: 탐색 윈도우 500자 확장 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
+    print(f"✅ 유상증자: 에러 수정 및 팩트 스캐너 정상 복구 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

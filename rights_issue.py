@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (가격/날짜 무적 스캐너 + 할인율 팩트 스캐너 결합)] ---
+# --- [XML 원문 족집게 파싱 (여백 파괴 + 팩트 스캐너)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -59,11 +59,11 @@ def extract_xml_details(api_key, rcept_no):
                     # 할인율 전용: 띄어쓰기 완전 박살낸 텍스트
                     text_no_space = re.sub(r'\s+', '', raw_text.replace('\xa0', '').replace('\u200b', ''))
                     
-                    # 1. 💡 가격 추출 (500자 스캐너 및 쉼표 파괴 로직 복구 완료!)
+                    # 1. 가격 추출 (500자 스캐너 + 쉼표 파괴)
                     def get_price(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+500]
-                            win_clean = re.sub(r'[\s,]', '', window) # 쉼표/공백 완전 제거
+                            win_clean = re.sub(r'[\s,]', '', window) 
                             
                             nums = re.findall(r'(?<!\d)([1-9]\d{2,})(?!\d)', win_clean)
                             for val_str in nums:
@@ -75,9 +75,8 @@ def extract_xml_details(api_key, rcept_no):
                     extracted['issue_price'] = get_price(r'(?:1\s*주\s*당|확\s*정|예\s*정|모\s*집|발\s*행|신\s*주).{0,10}?발\s*행\s*가\s*(?:액)?')
                     extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액|단\s*가|주\s*당\s*가\s*액)')
                     
-                    # 2. 💡 할인/할증률 (회원님 요청 반영: 봇의 짐작을 빼고 "원문 팩트" 그대로 추출!)
+                    # 2. 할인/할증률 (원본 팩트 100% 반영 스캐너)
                     def get_discount():
-                        # 기호(+,-)가 있든 없든 원문에 적힌 숫자만 정확히 뽑아냄
                         pattern = r'(?:할인|할증)[율률](?:또는할증[율률]|또는할인[율률])?[^\d]{0,30}?([+\-]?\d+(?:\.\d+)?)'
                         match = re.search(pattern, text_no_space)
                         
@@ -89,17 +88,12 @@ def extract_xml_details(api_key, rcept_no):
                                 return '-'
                                 
                             if val == 0: return "0.00%"
-                            if abs(val) > 100: return '-' # 페이지 번호 스킵
+                            if abs(val) > 100: return '-'
                             
-                            # 보고서에 기호가 있으면 있는 대로, 없으면 없는 대로 정직하게 출력
-                            if '-' in val_str:
-                                return f"{val:.2f}%"
-                            elif '+' in val_str:
-                                return f"{val:+.2f}%"
-                            else:
-                                return f"{val:.2f}%" # (예: 2.80 이면 그냥 2.80% 로 팩트 출력)
+                            if '-' in val_str: return f"{val:.2f}%"
+                            elif '+' in val_str: return f"{val:+.2f}%"
+                            else: return f"{val:.2f}%"
                                 
-                        # '해당없음' 방어
                         if re.search(r'(?:할인|할증)[율률].{0,20}?(?:해당|없음|-)', text_no_space):
                             return "0.00%"
                             
@@ -107,7 +101,7 @@ def extract_xml_details(api_key, rcept_no):
                         
                     extracted['discount'] = get_discount()
                     
-                    # 3. 💡 날짜 추출 (500자 스캐너 및 슬래시(/) 지원 로직 복구 완료!)
+                    # 3. 날짜 추출 (500자 스캐너 + 슬래시 지원)
                     def get_date(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+500]
@@ -143,7 +137,7 @@ def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=12)).strftime('%Y%m%d')
 
-    print("최근 12일 유상증자 공시 탐색 중 (가격/날짜 복구 & 할인율 팩트 스캐너 작동)...")
+    print("최근 12일 유상증자 공시 탐색 중 (자동 재검토 및 덮어쓰기 모드 작동)...")
     
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
@@ -180,26 +174,20 @@ def get_and_update_yusang():
     df_combined = pd.concat(detail_dfs, ignore_index=True)
     df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
     
+    # 보고서 목록과 병합
     df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
     
     worksheet = sh.worksheet('유상증자')
     existing_rcept_nos = worksheet.col_values(21) 
     
-    new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
-    
-    if new_data_df.empty:
-        print("ℹ️ 새로 추가할 데이터가 없습니다.")
-        return
-        
-    data_to_add = []
+    data_to_add = [] # 완전 새로운 공시들만 담을 바구니
     cls_map = {'Y': '유가', 'K': '코스닥', 'N': '코넥스', 'E': '기타'}
     
-    for _, row in new_data_df.iterrows():
+    # 💡 여기서부터 핵심: 모든 공시를 순회하며 "재검토(덮어쓰기)"할지 "신규 추가"할지 결정합니다.
+    for _, row in df_merged.iterrows():
         rcept_no = str(row.get('rcept_no', ''))
         corp_name = row.get('corp_name', '')
         report_nm = row.get('report_nm', '') 
-        
-        print(f" -> {corp_name} 데이터 추출 및 포매팅 적용 중...")
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
@@ -252,7 +240,7 @@ def get_and_update_yusang():
             xml_data.get('issue_price', '-'),    # 8
             xml_data.get('base_price', '-'),     # 9
             total_amt_uk,                        # 10
-            xml_data.get('discount', '-'),       # 11 (* 수학 계산 폐기! 원본 팩트 스캔!)
+            xml_data.get('discount', '-'),       # 11
             old_shares_str,                      # 12
             ratio,                               # 13
             xml_data['pay_date'],                # 14
@@ -265,10 +253,29 @@ def get_and_update_yusang():
             rcept_no                             # 21
         ]
         
-        data_to_add.append(new_row)
+        # 💡 [자가 치유 기능] 구글 시트에 이미 번호가 있다면? 덮어쓰기!
+        if rcept_no in existing_rcept_nos:
+            # 몇 번째 줄인지 찾기 (리스트는 0부터 시작하므로 +1)
+            row_idx = existing_rcept_nos.index(rcept_no) + 1 
+            
+            try: # gspread 버전에 따른 호환성 처리
+                worksheet.update(range_name=f'A{row_idx}:U{row_idx}', values=[new_row])
+            except TypeError:
+                worksheet.update(f'A{row_idx}:U{row_idx}', [new_row])
+                
+            print(f" 🔄 {corp_name}: 기존 데이터 재검토 완료! 완벽한 데이터로 덮어썼습니다. (행: {row_idx})")
+            
+        # 구글 시트에 번호가 아예 없다면? 새로운 행 추가 준비!
+        else:
+            print(f" 🆕 {corp_name}: 신규 데이터 스캔 완료! 추가 준비 중...")
+            data_to_add.append(new_row)
         
-    worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: 에러 수정 및 팩트 스캐너 정상 복구 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
+    # 새로운 공시가 있으면 맨 밑에 한꺼번에 추가
+    if data_to_add:
+        worksheet.append_rows(data_to_add)
+        print(f"✅ 유상증자: 신규 공시 {len(data_to_add)}건 추가 완료!")
+    else:
+        print("✅ 유상증자: 새 공시는 없으며, 기존 공시들의 재검토 및 덮어쓰기(수정)를 완료했습니다!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

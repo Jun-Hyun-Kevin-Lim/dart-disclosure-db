@@ -2,15 +2,7 @@ name: DART Equity-Linked Auto Updater
 
 on:
   schedule:
-    # KST 평일 07:30~14:30 (30분 단위)
-    - cron: '30 22 * * 0-4'
-    - cron: '0,30 23 * * 0-4'
-    - cron: '0,30 0-5 * * 1-5'
-
-    # KST 평일 15:00~20:00 (10분 단위, 20:00 포함)
-    - cron: '*/10 6-10 * * 1-5'
-    - cron: '0 11 * * 1-5'
-
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:

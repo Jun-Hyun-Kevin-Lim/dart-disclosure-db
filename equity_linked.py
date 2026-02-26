@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [채권 전용 XML 원문 족집게 파싱 (콜/풋옵션 내용 추출 500자로 대폭 확장)] ---
+# --- [채권 전용 XML 원문 족집게 파싱 (정확도 중심 경계선 탐지 추출)] ---
 def extract_bond_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -56,18 +56,47 @@ def extract_bond_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 💡 1. Put Option (조기상환청구권) : 500자로 넉넉하게 추출
-                    put_match = re.search(r'(조기상환\s*청구권.{0,500})', clean_text)
-                    if put_match:
-                        extracted['put_option'] = put_match.group(1).strip() + "..."
+                    # 💡 특정 항목의 시작점부터 다음 항목 제목 직전까지만 잘라내는 함수
+                    def get_section_text(text, start_regex, stop_regex, max_chars=1000):
+                        start_match = re.search(start_regex, text)
+                        if not start_match:
+                            return "없음"
                         
-                    # 💡 2. Call Option (매도청구권) : 500자로 넉넉하게 추출
-                    call_match = re.search(r'(매도\s*청구권.{0,500})', clean_text)
-                    if call_match:
-                        extracted['call_option'] = call_match.group(1).strip() + "..."
+                        start_idx = start_match.start()
+                        # 시작 키워드 이후의 텍스트만 분리
+                        after_text = text[start_match.end():]
                         
-                        # Call 비율 추출
-                        ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', call_match.group(0))
+                        # 다음 섹션(정지 키워드)이 나타나는 위치 찾기
+                        stop_match = re.search(stop_regex, after_text)
+                        
+                        if stop_match:
+                            # 다음 키워드 직전까지만 정확하게 잘라냄
+                            content = text[start_idx : start_match.end() + stop_match.start()]
+                        else:
+                            # 끝을 못 찾으면 지정한 최대 글자수까지만 (안전망)
+                            content = text[start_idx : start_idx + max_chars]
+                            
+                        content = content.strip()
+                        # 끝에 의미 없이 남은 특수문자나 쉼표 제거
+                        content = re.sub(r'[\,\-\.\s]+$', '', content)
+                        
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + "..."
+                        return content
+
+                    # 💡 1. Put Option (조기상환청구권) 추출
+                    # 정지 키워드: 매도청구권, 기타 투자판단, 발행회사의 기한 등 주요 다음 목차
+                    put_stop_regex = r'(매도\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
+                    extracted['put_option'] = get_section_text(clean_text, r'조기상환\s*청구권', put_stop_regex)
+                    
+                    # 💡 2. Call Option (매도청구권) 추출
+                    # 정지 키워드: 조기상환청구권, 기타 투자판단 등
+                    call_stop_regex = r'(조기상환\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
+                    extracted['call_option'] = get_section_text(clean_text, r'매도\s*청구권', call_stop_regex)
+                    
+                    # Call 비율 추출 (추출된 텍스트 안에서만 찾기 때문에 혼선 방지)
+                    if extracted['call_option'] != '없음':
+                        ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', extracted['call_option'])
                         if ratio_match:
                             extracted['call_ratio'] = ratio_match.group(1) + '%'
                             
@@ -114,7 +143,7 @@ def get_and_update_bonds():
         print("최근 지정 기간 내 주요사항보고서가 없습니다.")
         return
 
-    # 채권 종류별 설정값 (API 필드명이 다르므로 매핑)
+    # 채권 종류별 설정값
     bond_configs = [
         {
             'type': 'CB', 'keyword': '전환사채권발행결정', 'endpoint': 'cvbdIsDecsn',
@@ -126,7 +155,7 @@ def get_and_update_bonds():
         },
         {
             'type': 'EB', 'keyword': '교환사채권발행결정', 'endpoint': 'exbdIsDecsn',
-            'fields': {'price': 'ex_prc', 'shares': 'extg_stkcnt', 'ratio': 'extg_tisstk_vs', 'start': 'exrqpd_bgd', 'end': 'exrqpd_edd', 'refix': ''} # EB는 보통 리픽싱 없음
+            'fields': {'price': 'ex_prc', 'shares': 'extg_stkcnt', 'ratio': 'extg_tisstk_vs', 'start': 'exrqpd_bgd', 'end': 'exrqpd_edd', 'refix': ''} 
         }
     ]
 
@@ -156,8 +185,6 @@ def get_and_update_bonds():
             
         df_combined = pd.concat(detail_dfs, ignore_index=True)
         
-        # 💡 [버그 해결] pd.merge를 쓰지 않고 df_filtered의 접수번호로만 필터링! 
-        # (이로써 corp_cls_x 같은 변형이 생기지 않아 상장시장 데이터가 100% 정상 추출됩니다)
         target_rcept_nos = df_filtered['rcept_no'].unique()
         df_merged = df_combined[df_combined['rcept_no'].isin(target_rcept_nos)]
         
@@ -197,7 +224,7 @@ def get_and_update_bonds():
             face_value = to_int(row.get('bd_fta'))
             face_value_str = f"{face_value:,}" if face_value > 0 else "-"
             
-            # 발행상품명 구성 (예: 제3회차 무기명식 이권부 무보증 사모 전환사채)
+            # 발행상품명 구성
             bd_tm = str(row.get('bd_tm', '')).strip()
             bd_knd = str(row.get('bd_knd', '')).strip()
             product_name = f"제{bd_tm}회차 {bd_knd}" if bd_tm else bd_knd
@@ -219,7 +246,7 @@ def get_and_update_bonds():
             new_row = [
                 config['type'],                             # 1. 구분 (CB, BW, EB)
                 corp_name,                                  # 2. 회사명
-                cls_map.get(row.get('corp_cls', ''), '기타'),# 3. 상장시장 (이제 정상 출력됨!)
+                cls_map.get(row.get('corp_cls', ''), '기타'),# 3. 상장시장
                 str(row.get('bddd', '-')),                  # 4. 최초 이사회결의일
                 face_value_str,                             # 5. 권면총액(원)
                 str(row.get('bd_intr_ex', '-')),            # 6. Coupon (표면이자율)
@@ -227,8 +254,8 @@ def get_and_update_bonds():
                 str(row.get('bd_mtd', '-')),                # 8. 만기
                 str(row.get(f_map['start'], '-')),          # 9. 전환청구 시작
                 str(row.get(f_map['end'], '-')),            # 10. 전환청구 종료
-                xml_data['put_option'],                     # 11. Put Option (500자 요약)
-                xml_data['call_option'],                    # 12. Call Option (500자 요약)
+                xml_data['put_option'],                     # 11. Put Option (정확도 대폭 향상)
+                xml_data['call_option'],                    # 12. Call Option (정확도 대폭 향상)
                 xml_data['call_ratio'],                     # 13. Call 비율
                 xml_data['ytc'],                            # 14. YTC
                 str(row.get('bdis_mthn', '-')),             # 15. 모집방식

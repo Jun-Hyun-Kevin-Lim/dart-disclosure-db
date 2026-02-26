@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (기준주가 & 할인율 정확도 극한 향상)] ---
+# --- [XML 원문 족집게 파싱 (수학적 크로스체크 엔진 탑재)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -56,7 +56,7 @@ def extract_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. 가격 추출 (기준주가 단어 확장)
+                    # 1. 가격 추출
                     def get_price(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+150]
@@ -68,21 +68,27 @@ def extract_xml_details(api_key, rcept_no):
                         return '-'
                         
                     extracted['issue_price'] = get_price(r'(?:확\s*정|예\s*정)?\s*발\s*행\s*가\s*(?:액)?')
-                    # '기준주가', '기준발행가액', '기준가액' 모두 캐치
                     extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액)')
                     
-                    # 2. 할인/할증률 (회원님이 찾아주신 긴 문장 완벽 반영 및 부호 자동 판별)
-                    def get_discount():
-                        # '기준주가에 대한 할인율 또는 할증율 (%)' 같은 긴 문장도 잡히도록 패턴 설계
-                        pattern = r'(?:기\s*준\s*주\s*가\s*에\s*대\s*한\s*)?(할\s*인\s*[률율]|할\s*증\s*[률율]|할\s*인\s*[\(\[]?\s*할\s*증\s*[\)\]]?\s*[률율])'
+                    # 2. 할인/할증률 추출 (수학적 부호 판별 + 확장 패턴)
+                    def get_discount(issue_p, base_p):
+                        # 수학적 크로스체크 (발행가와 기준주가가 모두 추출되었을 때만 작동)
+                        expected_sign = 0
+                        if issue_p != '-' and base_p != '-':
+                            i_val = int(issue_p.replace(',', ''))
+                            b_val = int(base_p.replace(',', ''))
+                            if b_val > 0:
+                                if i_val > b_val: expected_sign = 1    # 할증 (플러스)
+                                elif i_val < b_val: expected_sign = -1 # 할인 (마이너스)
+                        
+                        # "할인율 또는 할증율" 패턴 추가
+                        pattern = r'(할\s*인\s*[률율]\s*또\s*는\s*할\s*증\s*[률율]|할\s*인\s*[\(\[\{]?\s*할\s*증\s*[\)\]\}]?\s*[률율]|할\s*인\s*[률율]|할\s*증\s*[률율])'
                         
                         for match in re.finditer(pattern, clean_text):
                             keyword = match.group(0).replace(' ', '')
-                            window = clean_text[match.end():match.end()+150] # 퍼센트 기호까지 도달하도록 범위 넉넉히
+                            window = clean_text[match.end():match.end()+150]
                             
-                            # 1순위: % 기호가 있는 숫자 검색
                             m = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+|[\-\+]?\s*[0-9]+)\s*%', window)
-                            # 2순위: % 기호는 빼먹었지만 소수점(10.0)으로 적어놓은 숫자 검색
                             if not m:
                                 m = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+)', window)
                                 
@@ -90,27 +96,30 @@ def extract_xml_details(api_key, rcept_no):
                                 val_str = m.group(1).replace(' ', '')
                                 val = float(val_str)
                                 
-                                if val == 0:
-                                    return "0.00%"
+                                if val == 0: return "0.00%"
                                 
-                                # 문자열 안에 기호가 포함되어 있는지 확인 후 부호 강제 교정
-                                if '-' in val_str:
-                                    val = -abs(val)
-                                elif '+' in val_str:
-                                    val = abs(val)
+                                val = abs(val) # 일단 무조건 절대값(양수)으로 만듦
+                                
+                                # 1순위: 수학적 계산 결과가 있으면 무조건 그걸 따름
+                                if expected_sign != 0:
+                                    val = val * expected_sign
                                 else:
-                                    # 기호가 안 적혀 있을 때 단어 문맥으로 파악
-                                    if '할인율' in keyword and '할증' not in keyword:
-                                        val = -abs(val) # 할인이면 무조건 마이너스
-                                    elif '할증율' in keyword and '할인' not in keyword:
-                                        val = abs(val) # 할증이면 무조건 플러스
-                                    else:
-                                        val = -abs(val) # 둘 다 적혀있는데 기호가 없으면 관례상 할인(마이너스)으로 처리
+                                    # 2순위: 가격 추출에 실패했을 경우 텍스트 문맥으로 유추
+                                    if '-' in val_str: val = -val
+                                    elif '+' in val_str: val = val
+                                    elif '할증' in keyword and '할인' not in keyword: val = val
+                                    else: val = -val # 기본값은 할인(마이너스)
                                         
-                                return f"{val:+.2f}%" # 결과는 무조건 + 또는 - 기호를 달아서 소수점 2자리로 출력!
+                                return f"{val:+.2f}%"
                                 
+                            # "해당없음" 방어 코드
+                            if re.search(r'(해당\s*사항\s*없음|해당\s*없음|-)', window[:30]):
+                                if not re.search(r'[0-9]', window[:30]):
+                                    return "0.00%"
                         return '-'
-                    extracted['discount'] = get_discount()
+                    
+                    # 함수 실행 및 결과 저장
+                    extracted['discount'] = get_discount(extracted['issue_price'], extracted['base_price'])
                     
                     # 3. 날짜 추출
                     def get_date(keyword):
@@ -182,14 +191,11 @@ def get_and_update_yusang():
         return
         
     df_combined = pd.concat(detail_dfs, ignore_index=True)
-    
     df_combined = df_combined.drop(columns=['corp_cls'], errors='ignore')
-    
     df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls', 'report_nm']], on='rcept_no', how='left')
     
     worksheet = sh.worksheet('유상증자')
-    existing_rcept_nos = worksheet.col_values(21) # 21번째 접수번호 컬럼 확인
-    
+    existing_rcept_nos = worksheet.col_values(21) 
     new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
     
     if new_data_df.empty:
@@ -246,7 +252,6 @@ def get_and_update_yusang():
         
         link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
         
-        # 총 21칸 완성
         new_row = [
             corp_name,                  # 1
             report_nm,                  # 2 
@@ -258,7 +263,7 @@ def get_and_update_yusang():
             xml_data.get('issue_price', '-'),    # 8
             xml_data.get('base_price', '-'),     # 9
             total_amt_uk,               # 10
-            xml_data.get('discount', '-'),       # 11
+            xml_data.get('discount', '-'),       # 11 (+, - 완벽 해결)
             old_shares_str,             # 12
             ratio,                      # 13
             xml_data['pay_date'],       # 14
@@ -268,13 +273,13 @@ def get_and_update_yusang():
             purpose_str,                # 18
             xml_data['investor'],       # 19
             link,                       # 20
-            rcept_no                    # 21 (접수번호 U열)
+            rcept_no                    # 21
         ]
         
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: '기준주가', '할인율' 추출 정확도 개선 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
+    print(f"✅ 유상증자: '수학적 크로스체크' 적용 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

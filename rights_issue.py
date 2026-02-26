@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (정확도 극대화)] ---
+# --- [XML 원문 족집게 파싱 (기준주가 & 할인율 정확도 극한 향상)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -56,7 +56,7 @@ def extract_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. 가격 추출
+                    # 1. 가격 추출 (기준주가 단어 확장)
                     def get_price(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+150]
@@ -68,40 +68,47 @@ def extract_xml_details(api_key, rcept_no):
                         return '-'
                         
                     extracted['issue_price'] = get_price(r'(?:확\s*정|예\s*정)?\s*발\s*행\s*가\s*(?:액)?')
-                    # '기준발행가액', '기준가액' 등 변칙적인 표현 모두 포함
-                    extracted['base_price'] = get_price(r'기\s*준\s*주\s*가|기\s*준\s*발\s*행\s*가\s*액|기\s*준\s*가\s*액')
+                    # '기준주가', '기준발행가액', '기준가액' 모두 캐치
+                    extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액)')
                     
-                    # 2. 할인/할증률 (정확도 대폭 강화)
+                    # 2. 할인/할증률 (회원님이 찾아주신 긴 문장 완벽 반영 및 부호 자동 판별)
                     def get_discount():
-                        # 할인율, 할증률, 할인(할증)율, 할인율(할증율) 등 모든 패턴
-                        pattern = r'(할\s*인\s*[률율]|할\s*증\s*[률율]|할\s*인\s*[\(\[]?\s*할\s*증\s*[\)\]]?\s*[률율])'
+                        # '기준주가에 대한 할인율 또는 할증율 (%)' 같은 긴 문장도 잡히도록 패턴 설계
+                        pattern = r'(?:기\s*준\s*주\s*가\s*에\s*대\s*한\s*)?(할\s*인\s*[률율]|할\s*증\s*[률율]|할\s*인\s*[\(\[]?\s*할\s*증\s*[\)\]]?\s*[률율])'
+                        
                         for match in re.finditer(pattern, clean_text):
-                            keyword = match.group(1).replace(' ', '')
-                            window = clean_text[match.end():match.end()+100]
+                            keyword = match.group(0).replace(' ', '')
+                            window = clean_text[match.end():match.end()+150] # 퍼센트 기호까지 도달하도록 범위 넉넉히
                             
-                            # 1순위: % 기호가 있는 숫자
-                            m = re.search(r'([\-\+]?\s*[0-9]+\.?[0-9]*)\s*%', window)
-                            
-                            # 2순위: % 기호가 빠진 채 소수점 숫자만 적힌 경우 (예: 10.0)
+                            # 1순위: % 기호가 있는 숫자 검색
+                            m = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+|[\-\+]?\s*[0-9]+)\s*%', window)
+                            # 2순위: % 기호는 빼먹었지만 소수점(10.0)으로 적어놓은 숫자 검색
                             if not m:
-                                m2 = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+)', window)
-                                if m2 and float(m2.group(1).replace(' ', '')) < 100:
-                                    m = m2
-                                    
+                                m = re.search(r'([\-\+]?\s*[0-9]+\.[0-9]+)', window)
+                                
                             if m:
-                                val = float(m.group(1).replace(' ', ''))
+                                val_str = m.group(1).replace(' ', '')
+                                val = float(val_str)
+                                
                                 if val == 0:
                                     return "0.00%"
-                                if '할인' in keyword and '할증' not in keyword and val > 0: val = -val
-                                elif '할증' in keyword and '할인' not in keyword and val < 0: val = -val
-                                elif '할인' in keyword and '할증' in keyword and val > 0 and '+' not in m.group(1): val = -val
-                                return f"{val:+.2f}%"
                                 
-                            # 3순위: 표에 "해당없음" 등으로 적혀 있어 할인이 아예 없는 경우
-                            if re.search(r'(해당\s*사항\s*없음|해당\s*없음|-)', window[:20]):
-                                if not re.search(r'[0-9]', window[:20]):
-                                    return "0.00%"
-                                    
+                                # 문자열 안에 기호가 포함되어 있는지 확인 후 부호 강제 교정
+                                if '-' in val_str:
+                                    val = -abs(val)
+                                elif '+' in val_str:
+                                    val = abs(val)
+                                else:
+                                    # 기호가 안 적혀 있을 때 단어 문맥으로 파악
+                                    if '할인율' in keyword and '할증' not in keyword:
+                                        val = -abs(val) # 할인이면 무조건 마이너스
+                                    elif '할증율' in keyword and '할인' not in keyword:
+                                        val = abs(val) # 할증이면 무조건 플러스
+                                    else:
+                                        val = -abs(val) # 둘 다 적혀있는데 기호가 없으면 관례상 할인(마이너스)으로 처리
+                                        
+                                return f"{val:+.2f}%" # 결과는 무조건 + 또는 - 기호를 달아서 소수점 2자리로 출력!
+                                
                         return '-'
                     extracted['discount'] = get_discount()
                     
@@ -251,7 +258,7 @@ def get_and_update_yusang():
             xml_data.get('issue_price', '-'),    # 8
             xml_data.get('base_price', '-'),     # 9
             total_amt_uk,               # 10
-            xml_data.get('discount', '-'),       # 11 (오류 방지 위해 get 함수로 통일)
+            xml_data.get('discount', '-'),       # 11
             old_shares_str,             # 12
             ratio,                      # 13
             xml_data['pay_date'],       # 14

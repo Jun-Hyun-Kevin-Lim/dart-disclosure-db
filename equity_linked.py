@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [채권 전용 XML 원문 족집게 파싱 (콜/풋옵션 내용 추출 강화)] ---
+# --- [채권 전용 XML 원문 족집게 파싱 (콜/풋옵션 내용 추출 500자로 대폭 확장)] ---
 def extract_bond_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -56,17 +56,17 @@ def extract_bond_xml_details(api_key, rcept_no):
                     raw_text = soup.get_text(separator=' ', strip=True)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 💡 1. Put Option (조기상환청구권) : 키워드 포함 뒤 150자 추출
-                    put_match = re.search(r'(조기상환\s*청구권.{0,150})', clean_text)
+                    # 💡 1. Put Option (조기상환청구권) : 500자로 넉넉하게 추출
+                    put_match = re.search(r'(조기상환\s*청구권.{0,500})', clean_text)
                     if put_match:
                         extracted['put_option'] = put_match.group(1).strip() + "..."
                         
-                    # 💡 2. Call Option (매도청구권) : 키워드 포함 뒤 150자 추출
-                    call_match = re.search(r'(매도\s*청구권.{0,150})', clean_text)
+                    # 💡 2. Call Option (매도청구권) : 500자로 넉넉하게 추출
+                    call_match = re.search(r'(매도\s*청구권.{0,500})', clean_text)
                     if call_match:
                         extracted['call_option'] = call_match.group(1).strip() + "..."
                         
-                        # Call 비율은 추출된 텍스트 안에서 % 숫자를 찾음
+                        # Call 비율 추출
                         ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', call_match.group(0))
                         if ratio_match:
                             extracted['call_ratio'] = ratio_match.group(1) + '%'
@@ -126,7 +126,7 @@ def get_and_update_bonds():
         },
         {
             'type': 'EB', 'keyword': '교환사채권발행결정', 'endpoint': 'exbdIsDecsn',
-            'fields': {'price': 'ex_prc', 'shares': 'extg_stkcnt', 'ratio': 'extg_tisstk_vs', 'start': 'exrqpd_bgd', 'end': 'exrqpd_edd', 'refix': ''} # EB는 리픽싱이 보통 없음
+            'fields': {'price': 'ex_prc', 'shares': 'extg_stkcnt', 'ratio': 'extg_tisstk_vs', 'start': 'exrqpd_bgd', 'end': 'exrqpd_edd', 'refix': ''} # EB는 보통 리픽싱 없음
         }
     ]
 
@@ -155,7 +155,12 @@ def get_and_update_bonds():
             continue
             
         df_combined = pd.concat(detail_dfs, ignore_index=True)
-        df_merged = pd.merge(df_combined, df_filtered[['rcept_no', 'corp_cls']], on='rcept_no', how='inner')
+        
+        # 💡 [버그 해결] pd.merge를 쓰지 않고 df_filtered의 접수번호로만 필터링! 
+        # (이로써 corp_cls_x 같은 변형이 생기지 않아 상장시장 데이터가 100% 정상 추출됩니다)
+        target_rcept_nos = df_filtered['rcept_no'].unique()
+        df_merged = df_combined[df_combined['rcept_no'].isin(target_rcept_nos)]
+        
         new_data_df = df_merged[~df_merged['rcept_no'].astype(str).isin(existing_rcept_nos)]
         
         if new_data_df.empty:
@@ -214,7 +219,7 @@ def get_and_update_bonds():
             new_row = [
                 config['type'],                             # 1. 구분 (CB, BW, EB)
                 corp_name,                                  # 2. 회사명
-                cls_map.get(row.get('corp_cls', ''), '기타'),# 3. 상장시장
+                cls_map.get(row.get('corp_cls', ''), '기타'),# 3. 상장시장 (이제 정상 출력됨!)
                 str(row.get('bddd', '-')),                  # 4. 최초 이사회결의일
                 face_value_str,                             # 5. 권면총액(원)
                 str(row.get('bd_intr_ex', '-')),            # 6. Coupon (표면이자율)
@@ -222,8 +227,8 @@ def get_and_update_bonds():
                 str(row.get('bd_mtd', '-')),                # 8. 만기
                 str(row.get(f_map['start'], '-')),          # 9. 전환청구 시작
                 str(row.get(f_map['end'], '-')),            # 10. 전환청구 종료
-                xml_data['put_option'],                     # 11. Put Option
-                xml_data['call_option'],                    # 12. Call Option
+                xml_data['put_option'],                     # 11. Put Option (500자 요약)
+                xml_data['call_option'],                    # 12. Call Option (500자 요약)
                 xml_data['call_ratio'],                     # 13. Call 비율
                 xml_data['ytc'],                            # 14. YTC
                 str(row.get('bdis_mthn', '-')),             # 15. 모집방식

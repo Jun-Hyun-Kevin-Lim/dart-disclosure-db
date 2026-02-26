@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [채권 전용 XML 원문 족집게 파싱 (정확도 중심 경계선 탐지 추출)] ---
+# --- [채권 전용 XML 원문 족집게 파싱 ('해당사항 없음' 완벽 처리)] ---
 def extract_bond_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -63,21 +63,23 @@ def extract_bond_xml_details(api_key, rcept_no):
                             return "없음"
                         
                         start_idx = start_match.start()
-                        # 시작 키워드 이후의 텍스트만 분리
                         after_text = text[start_match.end():]
-                        
-                        # 다음 섹션(정지 키워드)이 나타나는 위치 찾기
                         stop_match = re.search(stop_regex, after_text)
                         
                         if stop_match:
-                            # 다음 키워드 직전까지만 정확하게 잘라냄
                             content = text[start_idx : start_match.end() + stop_match.start()]
+                            # 키워드(제목) 이후의 실제 내용만 분리
+                            actual_content = after_text[:stop_match.start()].strip()
                         else:
-                            # 끝을 못 찾으면 지정한 최대 글자수까지만 (안전망)
                             content = text[start_idx : start_idx + max_chars]
+                            actual_content = after_text[:max_chars].strip()
                             
+                        # 💡 [핵심 수정] 내용이 비어있거나 '해당사항 없음'인 경우 무조건 "없음" 반환
+                        clean_actual = re.sub(r'[\s\-\.]', '', actual_content)
+                        if not clean_actual or clean_actual in ['해당사항없음', '해당없음', '없음']:
+                            return "없음"
+
                         content = content.strip()
-                        # 끝에 의미 없이 남은 특수문자나 쉼표 제거
                         content = re.sub(r'[\,\-\.\s]+$', '', content)
                         
                         if len(content) > max_chars:
@@ -85,16 +87,14 @@ def extract_bond_xml_details(api_key, rcept_no):
                         return content
 
                     # 💡 1. Put Option (조기상환청구권) 추출
-                    # 정지 키워드: 매도청구권, 기타 투자판단, 발행회사의 기한 등 주요 다음 목차
                     put_stop_regex = r'(매도\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
                     extracted['put_option'] = get_section_text(clean_text, r'조기상환\s*청구권', put_stop_regex)
                     
                     # 💡 2. Call Option (매도청구권) 추출
-                    # 정지 키워드: 조기상환청구권, 기타 투자판단 등
                     call_stop_regex = r'(조기상환\s*청구권|기타\s*투자판단|발행회사\s*의\s*기한|당해\s*사채|합병\s*관련)'
                     extracted['call_option'] = get_section_text(clean_text, r'매도\s*청구권', call_stop_regex)
                     
-                    # Call 비율 추출 (추출된 텍스트 안에서만 찾기 때문에 혼선 방지)
+                    # Call 비율 추출 (콜옵션이 '없음'이 아닐 때만 계산)
                     if extracted['call_option'] != '없음':
                         ratio_match = re.search(r'([0-9]{1,3}(?:\.[0-9]+)?)\s*%', extracted['call_option'])
                         if ratio_match:
@@ -254,8 +254,8 @@ def get_and_update_bonds():
                 str(row.get('bd_mtd', '-')),                # 8. 만기
                 str(row.get(f_map['start'], '-')),          # 9. 전환청구 시작
                 str(row.get(f_map['end'], '-')),            # 10. 전환청구 종료
-                xml_data['put_option'],                     # 11. Put Option (정확도 대폭 향상)
-                xml_data['call_option'],                    # 12. Call Option (정확도 대폭 향상)
+                xml_data['put_option'],                     # 11. Put Option ("해당없음" 완벽 처리)
+                xml_data['call_option'],                    # 12. Call Option ("해당없음" 완벽 처리)
                 xml_data['call_ratio'],                     # 13. Call 비율
                 xml_data['ytc'],                            # 14. YTC
                 str(row.get('bdis_mthn', '-')),             # 15. 모집방식

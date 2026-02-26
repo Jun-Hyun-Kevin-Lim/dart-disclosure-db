@@ -31,7 +31,7 @@ def fetch_dart_json(url, params):
         print(f"JSON API 에러: {e}")
     return pd.DataFrame()
 
-# --- [XML 원문 족집게 파싱 (여백 압축 + 앞뒤 스캔 엔진)] ---
+# --- [XML 원문 족집게 파싱 (할인율 집중 공략)] ---
 def extract_xml_details(api_key, rcept_no):
     url = "https://opendart.fss.or.kr/api/document.xml"
     params = {'crtfc_key': api_key, 'rcept_no': rcept_no}
@@ -54,83 +54,92 @@ def extract_xml_details(api_key, rcept_no):
                         tag.append(' ')
                         
                     raw_text = soup.get_text(separator=' ', strip=True)
+                    # 여백을 1칸으로만 압축 (다른 값이 망가지지 않게 유지)
                     clean_text = re.sub(r'\s+', ' ', raw_text)
                     
-                    # 1. 가격 추출 (띄어쓰기 완전 제거 후 탐색)
+                    # 1. 가격 추출 (안정적인 기존 코드 유지)
                     def get_price(keyword):
                         for match in re.finditer(keyword, clean_text):
-                            window = clean_text[match.end():match.end()+200]
-                            # 💡 핵심: 띄어쓰기를 완전히 없애버려서 5, 000 같은 숫자도 5000으로 붙여버림
-                            window_no_space = window.replace(' ', '') 
-                            nums = re.findall(r'(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d{2,})', window_no_space)
+                            window = clean_text[match.end():match.end()+150]
+                            nums = re.findall(r'(?<![\d\.])(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d{2,})(?![\d\.])', window)
                             for n in nums:
                                 val = int(n.replace(',', ''))
                                 if val >= 100 and val not in [2023, 2024, 2025, 2026, 2027]:
                                     return f"{val:,}"
                         return '-'
                         
-                    extracted['issue_price'] = get_price(r'(?:1\s*주\s*당|확\s*정|예\s*정|신\s*주)?\s*발\s*행\s*가\s*(?:액)?')
-                    extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액|단\s*가)')
+                    extracted['issue_price'] = get_price(r'(?:확\s*정|예\s*정)?\s*발\s*행\s*가\s*(?:액)?')
+                    extracted['base_price'] = get_price(r'기\s*준\s*(?:주\s*가|발\s*행\s*가\s*(?:액)?|가\s*액)')
                     
-                    # 2. 할인/할증률 (수학 엔진 & 앞뒤 250칸 탐색)
+                    # 2. 💡 할인/할증률 추출 (할인율 집중 고도화 엔진)
                     def get_discount(issue_p, base_p):
-                        math_rate = None
+                        # 긴 문구까지 완벽하게 잡아내는 패턴
+                        pattern = r'(기\s*준\s*주\s*가\s*에\s*대\s*한\s*)?(할\s*인\s*[률율]\s*또\s*는\s*할\s*증\s*[률율]|할\s*인\s*[\(\[\{]?\s*할\s*증\s*[\)\]\}]?\s*[률율]|할\s*인\s*[률율]|할\s*증\s*[률율])'
+                        
+                        extracted_val = None
+                        val_str = ""
+                        keyword = ""
+                        
+                        for match in re.finditer(pattern, clean_text):
+                            keyword = match.group(0).replace(' ', '')
+                            # 숫자 찾을 때만 해당 구간의 띄어쓰기를 없애서 정확히 캐치
+                            window = clean_text[match.end():match.end()+150].replace(' ', '')
+                            
+                            # 소수점이 있는 숫자 우선 탐색 (-2.80)
+                            m = re.search(r'([\-\+]?\d+\.\d+)', window)
+                            if not m:
+                                # 없으면 %가 붙어있는 정수 탐색 (10%)
+                                m = re.search(r'([\-\+]?\d+)%', window)
+                                
+                            if m:
+                                val_str = m.group(1)
+                                extracted_val = float(val_str)
+                                break
+                                
+                            if re.search(r'(해당\s*사항\s*없음|해당\s*없음|-)', window[:20]):
+                                return "0.00%"
+
+                        if extracted_val is None:
+                            return '-'
+                            
+                        if extracted_val == 0:
+                            return "0.00%"
+
+                        # --- 부호(+, -) 결정 로직 ---
+                        val_abs = abs(extracted_val)
+                        final_sign = 0 
+                        
+                        # 1단계: 문자열 자체에 기호가 있으면 우선 적용
+                        if '-' in val_str: final_sign = -1
+                        elif '+' in val_str: final_sign = 1
+                            
+                        # 2단계: 💡 수학적 크로스체크 (발행가 vs 기준주가 비교로 명확한 부호 확정)
                         if issue_p != '-' and base_p != '-':
                             try:
                                 i_v = float(issue_p.replace(',', ''))
                                 b_v = float(base_p.replace(',', ''))
-                                if b_v > 0: math_rate = (i_v / b_v - 1) * 100
-                            except: pass
+                                if b_v > 0:
+                                    if i_v > b_v: final_sign = 1    # 비싸게 팔면 무조건 할증(+)
+                                    elif i_v < b_v: final_sign = -1 # 싸게 팔면 무조건 할인(-)
+                            except:
+                                pass
+                                
+                        # 3단계: 수학 체크 불가 & 부호 없을 때 글자로 유추
+                        if final_sign == 0:
+                            if '할증' in keyword and '할인' not in keyword:
+                                final_sign = 1
+                            else:
+                                final_sign = -1 # 기본값은 할인(-)
+                                
+                        return f"{val_abs * final_sign:+.2f}%"
 
-                        pattern = r'(할\s*인\s*[률율]\s*또\s*는\s*할\s*증\s*[률율]|할\s*인\s*[\(\[\{]?\s*할\s*증\s*[\)\]\}]?\s*[률율]|할\s*인\s*[률율]|할\s*증\s*[률율])'
-                        
-                        for match in re.finditer(pattern, clean_text):
-                            keyword = match.group(0).replace(' ', '')
-                            
-                            # 💡 단어 앞 50칸, 뒤 200칸을 모두 가져옴 (10.0% 할인율... 처럼 숫자가 앞에 있는 경우 대비)
-                            start_idx = max(0, match.start() - 50)
-                            end_idx = min(len(clean_text), match.end() + 200)
-                            window = clean_text[start_idx:end_idx]
-                            window_no_space = window.replace(' ', '')
-                            
-                            # % 기호 있는 숫자 먼저 탐색
-                            m = re.search(r'([\-\+]?\d+\.?\d*)%', window_no_space)
-                            if not m:
-                                # % 없으면 소수점 있는 숫자 탐색 (예: -2.80)
-                                m = re.search(r'(?<!\d)([\-\+]?\d{1,2}\.\d+)(?!\d)', window_no_space)
-                                
-                            if m:
-                                val = float(m.group(1))
-                                if val == 0: return "0.00%"
-                                val = abs(val) # 일단 양수로 통일
-                                
-                                # 수학 계산 결과가 있으면 무조건 그걸 우선시 (에러율 0%)
-                                if math_rate is not None:
-                                    if math_rate > 0: return f"+{val:.2f}%"
-                                    elif math_rate < 0: return f"-{val:.2f}%"
-                                    else: return "0.00%"
-                                else:
-                                    if '할증' in keyword and '할인' not in keyword: return f"+{val:.2f}%"
-                                    else: return f"-{val:.2f}%"
-                                    
-                            if re.search(r'(해당\s*사항\s*없음|해당\s*없음|-)', window_no_space[:30]):
-                                return "0.00%"
-                                
-                        # 텍스트에 아예 할인율 단어가 없더라도, 가격이 있으면 수학으로 강제 계산!
-                        if math_rate is not None:
-                            return f"{math_rate:+.2f}%"
-                            
-                        return '-'
-                    
                     extracted['discount'] = get_discount(extracted['issue_price'], extracted['base_price'])
                     
-                    # 3. 날짜 추출 (날짜 사이의 모든 띄어쓰기 무시)
+                    # 3. 날짜 추출 (안정적인 기존 코드 유지)
                     def get_date(keyword):
                         for match in re.finditer(keyword, clean_text):
                             window = clean_text[match.end():match.end()+150]
-                            window_no_space = window.replace(' ', '')
-                            # 2026.02.12 처럼 붙어있는 포맷 완벽 스캔
-                            m = re.search(r'(202[3-7])[\-\.년/]([0-1]?[0-9])[\-\.월/]([0-3]?[0-9])', window_no_space)
+                            m = re.search(r'(20[2-3][0-9])\s*[\-\.년]\s*([0-1]?[0-9])\s*[\-\.월]\s*([0-3]?[0-9])', window)
                             if m:
                                 y, m_num, d_num = m.groups()
                                 return f"{y}년 {m_num.zfill(2)}월 {d_num.zfill(2)}일"
@@ -161,7 +170,7 @@ def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=12)).strftime('%Y%m%d')
 
-    print("최근 12일 유상증자 공시 탐색 중 (무적 스캐너 엔진 작동)...")
+    print("최근 12일 유상증자 공시 탐색 중 (할인율 집중 치료 버전)...")
     
     list_url = "https://opendart.fss.or.kr/api/list.json"
     list_params = {
@@ -217,7 +226,7 @@ def get_and_update_yusang():
         corp_name = row.get('corp_name', '')
         report_nm = row.get('report_nm', '') 
         
-        print(f" -> {corp_name} 여백 압축 데이터 탐색 적용 중...")
+        print(f" -> {corp_name} 데이터 추출 및 포매팅 적용 중...")
         
         xml_data = extract_xml_details(dart_key, rcept_no)
         
@@ -286,7 +295,7 @@ def get_and_update_yusang():
         data_to_add.append(new_row)
         
     worksheet.append_rows(data_to_add)
-    print(f"✅ 유상증자: 공란 복구 및 수학적 교정 100% 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
+    print(f"✅ 유상증자: 안정화 및 할인율 집중 개선 완료! 신규 데이터 {len(data_to_add)}건 추가됨!")
 
 if __name__ == "__main__":
     get_and_update_yusang()

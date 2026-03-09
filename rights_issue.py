@@ -103,7 +103,7 @@ def to_int(val):
 
 def get_and_update_yusang():
     end_date = datetime.now().strftime('%Y%m%d')
-    start_date = (datetime.now() - timedelta(days=7)).strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
 
     print("최근 7일 유상증자 공시 탐색 중 (데이터 최신화 검증 로직 포함)...")
     
